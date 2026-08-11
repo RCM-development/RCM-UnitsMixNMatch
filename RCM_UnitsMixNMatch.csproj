@@ -9,7 +9,6 @@
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <DebugType>portable</DebugType>
-    <NoWarn>$(NoWarn);CS0618;CS0612;CS0649;CS0169;CS0414;CS1701;CS1702</NoWarn>
   </PropertyGroup>
 
   <!-- Path to the installed game. Override with -p:GameDir=... if the game lives elsewhere. -->
@@ -25,11 +24,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- RCM-Manager checked out as a sibling directory -->
-    <ProjectReference Include="..\RCM-Manager\TestMod.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
     <!-- BepInEx + Harmony -->
     <Reference Include="$(BepCore)\BepInEx.dll"><Private>false</Private></Reference>
     <Reference Include="$(BepCore)\0Harmony.dll"><Private>false</Private></Reference>
@@ -42,4 +36,8 @@
     <Reference Include="$(Managed)\Newtonsoft.Json.dll"><Private>false</Private></Reference>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- RCM-Manager checked out as a sibling directory -->
+    <ProjectReference Include="..\RCM-Manager\TestMod.csproj" />
+  </ItemGroup>
 </Project>
