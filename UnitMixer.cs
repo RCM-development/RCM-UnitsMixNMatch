@@ -19,7 +19,7 @@ namespace RCM_UnitsMixNMatch
 
     [BepInDependency(RCMManager.IDENTIFIER, BepInDependency.DependencyFlags.HardDependency)]
     [BepInPlugin(IDENTIFIER, "Units Mix & Match", "1.0.0.0")]
-    internal class UnitMixer : BaseUnityPlugin
+    public class UnitMixer : BaseUnityPlugin
     {
         const string IDENTIFIER = "RCM.plugins.mixnmatch";
         static RCMModUI mod;
@@ -37,6 +37,12 @@ namespace RCM_UnitsMixNMatch
 
         const string supported_entities_path = "BepInEx\\plugins\\MixNMatchUnits.txt";
         static HashSet<string> supported_entities = new HashSet<string>();
+
+        // hook for other mods (e.g. RCM_Randomizer): return a donor entityId for the given base entity,
+        // or null to fall back to the built-in per-spawn random pick. selections outside the compat
+        // list are ignored so external mods can't bypass MixNMatchUnits.txt
+        public static Func<string, string> DonorSelector;
+        public static IReadOnlyCollection<string> SupportedEntities => supported_entities;
         void LoadEntityCompatibilityList(){
             supported_entities.Clear();
             if (File.Exists(supported_entities_path)){
@@ -143,8 +149,11 @@ namespace RCM_UnitsMixNMatch
                 foreach (var comp in comps) GameObject.Destroy(comp);
 
                 // grab another unit to frankenstien onto
-                // for now we're just using a helper to randomize what gets stuck on
-                string frankenstien_id = GetRandomSupportedEntity();
+                // an external DonorSelector (e.g. a seeded randomizer) takes priority, otherwise
+                // fall back to the built-in per-spawn random pick
+                string frankenstien_id = DonorSelector?.Invoke(__instance.entityId);
+                if (frankenstien_id == null || !supported_entities.Contains(frankenstien_id))
+                    frankenstien_id = GetRandomSupportedEntity();
                 RCMManager.Log("mixing units, base entityID: " + __instance.entityId + ", turret from: " + frankenstien_id);
 
                 GameObject frankenstien_entity_obj = (GameObject)GameObject.Instantiate(Resources.Load(EntityBalancingStore.PrefabLocation(frankenstien_id)), new Vector3(0, 0, 0), Quaternion.identity);
