@@ -47,6 +47,9 @@ namespace RCM_UnitsMixNMatch
 
         // scale transplanted turrets so their footprint roughly matches the turret they replace
         public static bool ScaleTransplantedTurrets = true;
+
+        // hitch attribution: log any single swap slower than this (0 disables)
+        public static double LogSwapsSlowerThanMs = 3.0;
         void LoadEntityCompatibilityList(){
             supported_entities.Clear();
             if (File.Exists(supported_entities_path)){
@@ -210,9 +213,23 @@ namespace RCM_UnitsMixNMatch
                     if (!supported_entities.Contains(entityId)) return;
                     string donor_id = DonorSelector(entityId);
                     if (string.IsNullOrEmpty(donor_id) || !supported_entities.Contains(donor_id)) return;
+                    var timer = StartTiming();
                     ApplyVisualSwap(__result, donor_id);
+                    ReportTiming(timer, "preview swap", entityId + " <- " + donor_id);
                 } catch (Exception e){ RCMManager.Log("preview turret swap failed: " + e.Message); }
             }
+        }
+
+        // timing helper shared by the swap paths
+        static System.Diagnostics.Stopwatch StartTiming(){
+            return LogSwapsSlowerThanMs > 0 ? System.Diagnostics.Stopwatch.StartNew() : null;
+        }
+        static void ReportTiming(System.Diagnostics.Stopwatch watch, string what, string detail){
+            if (watch == null) return;
+            watch.Stop();
+            double ms = watch.Elapsed.TotalMilliseconds;
+            if (ms >= LogSwapsSlowerThanMs)
+                RCMManager.Log($"MixNMatch PERF: {what} took {ms:F1}ms ({detail})");
         }
         static void ApplyVisualSwap(GameObject display_model, string donor_id){
             EntityController display_controller = display_model.GetComponent<EntityController>();
@@ -292,6 +309,8 @@ namespace RCM_UnitsMixNMatch
                 if (__instance.aiming == null 
                 ||  __instance.skillAiming != null // skip units with skill aiming because im not sure if those units cause issues, technically this is a redundant check as we've already removed from unit compat txt
                 || !supported_entities.Contains(__instance.entityId)) return true;
+
+                var swap_timer = StartTiming();
 
                 // get current turret object from current unit
                 Transform current_turret_pivot = GetPivotFromAiming(__instance.aiming);
@@ -582,6 +601,7 @@ namespace RCM_UnitsMixNMatch
                 // finally, cleanup the entity we stole the turret from
                 GameObject.Destroy(frankenstien_entity_obj);
 
+                ReportTiming(swap_timer, "unit swap", __instance.entityId + " <- " + frankenstien_id);
                 return true;
             }
         }
