@@ -19,7 +19,7 @@ namespace RCM_UnitsMixNMatch
 
     [BepInDependency(RCMManager.IDENTIFIER, BepInDependency.DependencyFlags.HardDependency)]
     [BepInPlugin(IDENTIFIER, "Units Mix & Match", "1.0.0.0")]
-    internal class UnitMixer : BaseUnityPlugin
+    public class UnitMixer : BaseUnityPlugin
     {
         const string IDENTIFIER = "RCM.plugins.mixnmatch";
         static RCMModUI mod;
@@ -37,6 +37,15 @@ namespace RCM_UnitsMixNMatch
 
         const string supported_entities_path = "BepInEx\\plugins\\MixNMatchUnits.txt";
         static HashSet<string> supported_entities = new HashSet<string>();
+
+        // hook for other mods (e.g. RCM_Randomizer): return a donor entityId for the given base entity,
+        // or null to fall back to the built-in per-spawn random pick. selections outside the compat
+        // list are ignored so external mods can't bypass MixNMatchUnits.txt
+        public static Func<string, string> DonorSelector;
+        public static IReadOnlyCollection<string> SupportedEntities => supported_entities;
+
+        // scale transplanted turrets so their footprint roughly matches the turret they replace
+        public static bool ScaleTransplantedTurrets = true;
         void LoadEntityCompatibilityList(){
             supported_entities.Clear();
             if (File.Exists(supported_entities_path)){
@@ -114,6 +123,118 @@ namespace RCM_UnitsMixNMatch
             return null;
         }
         
+        // uniform-scale the transplanted turret so its horizontal footprint roughly matches the
+        // old turret's. renderer AABBs instead of per-vertex bounds (cheap and good enough for
+        // a footprint), particles/trails ignored, a no-op deadzone because most turrets already
+        // fit reasonably, and a hard clamp so nothing degenerates
+        static void MatchTurretScale(Transform old_turret, Transform new_turret){
+            float old_size = HorizontalFootprint(old_turret);
+            float new_size = HorizontalFootprint(new_turret);
+            if (old_size < 0.001f || new_size < 0.001f) return;
+
+            // aim slightly SMALLER than the old turret: a snug gun reads better than a bulky one,
+            // and oversized turrets were the main visual complaint
+            float factor = old_size / new_size * 0.85f;
+            if (factor > 0.9f && factor < 1.1f) return; // fits well enough already
+            factor = Mathf.Clamp(factor, 0.35f, 2.5f);
+            new_turret.localScale *= factor;
+            RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1})");
+        }
+        static float HorizontalFootprint(Transform root){
+            if (!TryGetMeshBounds(root, out Bounds total)) return 0f;
+            // height counts too: a tower of a turret on a flat chassis looks as wrong as a wide one
+            return Mathf.Max(total.size.x, total.size.z, total.size.y * 0.8f);
+        }
+
+        // the swap positions the donor PIVOT at the old pivot, but a donor's mesh can sit far away
+        // from its own pivot (tall donor chassis), leaving the gun floating next to the new body.
+        // so move the transplanted pivot until the new turret's mesh sits where the old one's was:
+        // centered on it horizontally, resting at the same base height
+        static void AlignTransplantedTurret(Transform old_turret, Transform new_turret){
+            if (!TryGetMeshBounds(old_turret, out Bounds old_b) || !TryGetMeshBounds(new_turret, out Bounds new_b)) return;
+            Vector3 target = new Vector3(old_b.center.x, old_b.min.y + new_b.extents.y, old_b.center.z);
+            Vector3 offset = target - new_b.center;
+            if (offset.sqrMagnitude < 0.0001f) return;
+            new_turret.position += offset;
+            RCMManager.Log($"aligned transplanted turret by {offset.magnitude:F2}");
+        }
+
+        static bool TryGetMeshBounds(Transform root, out Bounds total){
+            total = default;
+            List<Bounds> parts = new List<Bounds>();
+            foreach (var r in root.GetComponentsInChildren<Renderer>()){
+                if (!(r is MeshRenderer) && !(r is SkinnedMeshRenderer)) continue;
+                if (!r.enabled) continue;
+                parts.Add(r.bounds);
+            }
+            if (parts.Count == 0) return false;
+
+            // beam/effect meshes are stretched towards their target and report enormous world
+            // bounds (one turret measured 215657 units), which would wreck scale & alignment.
+            // so drop anything far bigger than the typical part before combining
+            List<float> sizes = parts.Select(b => Mathf.Max(b.size.x, b.size.y, b.size.z)).OrderBy(v => v).ToList();
+            float limit = Mathf.Max(0.001f, sizes[sizes.Count / 2] * 4f);
+            bool has_bounds = false;
+            foreach (var b in parts){
+                if (Mathf.Max(b.size.x, b.size.y, b.size.z) > limit) continue;
+                if (!has_bounds){ total = b; has_bounds = true; }
+                else total.Encapsulate(b);
+            }
+            if (!has_bounds) total = parts[0];
+            return true;
+        }
+
+        // Card models and building placement previews come from EntityFactory.CreateEntityMesh.
+        // When an external DonorSelector is set (stable per-run donors), transplant the donor
+        // turret onto those display models too, so the blueprint card shows the actual unit.
+        // The EntityController on the display model is Destroy()ed by CreateEntityMesh but that
+        // is deferred, so it is still readable this frame.
+        [HarmonyPatch(typeof(EntityFactory), "CreateEntityMesh")]
+        public static class Patch_EntityFactory_CreateEntityMesh{
+            [HarmonyPostfix]
+            public static void Postfix(string entityId, GameObject __result){
+                try{
+                    if (__result == null || DonorSelector == null) return;
+                    if (!supported_entities.Contains(entityId)) return;
+                    string donor_id = DonorSelector(entityId);
+                    if (donor_id == null || !supported_entities.Contains(donor_id)) return;
+                    ApplyVisualSwap(__result, donor_id);
+                } catch (Exception e){ RCMManager.Log("preview turret swap failed: " + e.Message); }
+            }
+        }
+        static void ApplyVisualSwap(GameObject display_model, string donor_id){
+            EntityController display_controller = display_model.GetComponent<EntityController>();
+            if (display_controller == null || display_controller.aiming == null || display_controller.skillAiming != null) return;
+            Transform old_pivot = GetPivotFromAiming(display_controller.aiming);
+            if (old_pivot == null) return;
+
+            GameObject donor_obj = (GameObject)GameObject.Instantiate(Resources.Load(EntityBalancingStore.PrefabLocation(donor_id)), new Vector3(0, 0, 0), Quaternion.identity);
+            try{
+                EntityController donor_controller = donor_obj.GetComponent<EntityController>();
+                Transform new_pivot = (donor_controller == null || donor_controller.aiming == null) ? null : GetPivotFromAiming(donor_controller.aiming);
+                if (new_pivot == null) return;
+
+                new_pivot.SetParent(old_pivot.parent);
+                new_pivot.position = old_pivot.position;
+                new_pivot.rotation = old_pivot.rotation;
+                // display model only: strip everything but the meshes so nothing ticks or reacts
+                foreach (var comp in new_pivot.GetComponentsInChildren<Component>(true)){
+                    if (comp is Transform || comp is MeshFilter || comp is MeshRenderer || comp is SkinnedMeshRenderer) continue;
+                    GameObject.Destroy(comp);
+                }
+                if (ScaleTransplantedTurrets) MatchTurretScale(old_pivot, new_pivot);
+                AlignTransplantedTurret(old_pivot, new_pivot);
+                // match the display layer or the card/preview camera won't render it
+                int display_layer = old_pivot.gameObject.layer;
+                foreach (var t in new_pivot.GetComponentsInChildren<Transform>(true)) t.gameObject.layer = display_layer;
+
+                foreach (var r in old_pivot.GetComponentsInChildren<Renderer>()) r.enabled = false;
+                foreach (var p in old_pivot.GetComponentsInChildren<ParticleSystem>()) p.gameObject.SetActive(false);
+            } finally{
+                GameObject.Destroy(donor_obj);
+            }
+        }
+
         public static bool IsChildOf(Transform child, Transform potentialParent){
             if (child == potentialParent) return true;
             Transform t = child;
@@ -167,14 +288,30 @@ namespace RCM_UnitsMixNMatch
                 foreach (var comp in comps) GameObject.Destroy(comp);
 
                 // grab another unit to frankenstien onto
-                // for now we're just using a helper to randomize what gets stuck on
-                string frankenstien_id = GetRandomSupportedEntity();
+                // an external DonorSelector (e.g. a seeded randomizer) takes priority, otherwise
+                // fall back to the built-in per-spawn random pick
+                string frankenstien_id = DonorSelector?.Invoke(__instance.entityId);
+                if (frankenstien_id == null || !supported_entities.Contains(frankenstien_id))
+                    frankenstien_id = GetRandomSupportedEntity();
                 RCMManager.Log("mixing units, base entityID: " + __instance.entityId + ", turret from: " + frankenstien_id);
 
                 GameObject frankenstien_entity_obj = (GameObject)GameObject.Instantiate(Resources.Load(EntityBalancingStore.PrefabLocation(frankenstien_id)), new Vector3(0, 0, 0), Quaternion.identity);
                 EntityController frankenstien_controller = frankenstien_entity_obj.GetComponent<EntityController>();
 
-                // hoping that this works out of the box, if not then we have to delete the scalables
+                // whether a unit charges in or shoots from afar belongs to the weapon, not the chassis:
+                // a transplanted melee weapon (poker) on a ranged chassis would otherwise be swung
+                // from across the map. Init builds EntityAttack from these fields right after this
+                // prefix, so setting them here is enough. the extension is padded a little because
+                // the new chassis reaches from its own collision radius
+                if (__instance.melee != frankenstien_controller.melee)
+                    RCMManager.Log("weapon is " + (frankenstien_controller.melee ? "melee" : "ranged") + ", switching " + __instance.entityId + " to match");
+                __instance.melee = frankenstien_controller.melee;
+                __instance.meleeRadiusExtension = frankenstien_controller.melee
+                    ? frankenstien_controller.meleeRadiusExtension + 0.5f
+                    : frankenstien_controller.meleeRadiusExtension;
+
+                // NOTE: for now we have to delete all of these components on the new turret because they have references that escape the turret gameobject
+                // we could fix these up to reference the `__instance` variable instead, but haven't tested if this works or not
                 ScaleByChangeableValue[] scaleables = frankenstien_entity_obj.GetComponentsInChildren<ScaleByChangeableValue>();
                 foreach (var scaleable in scaleables)
                     scaleable.entityController = __instance;
@@ -411,6 +548,12 @@ namespace RCM_UnitsMixNMatch
                 frankenstien_pivot.SetParent(current_turret_pivot.parent);
                 frankenstien_pivot.position = current_turret_pivot.position;
                 frankenstien_pivot.rotation = current_turret_pivot.rotation;
+
+                // match the new turret's size to the one it replaces, then align the meshes
+                // (both measured before the old turret's renderers get disabled below)
+                if (ScaleTransplantedTurrets)
+                    MatchTurretScale(current_turret_pivot, frankenstien_pivot);
+                AlignTransplantedTurret(current_turret_pivot, frankenstien_pivot);
 
                 // there are a few things i haven't fixed that prevent us from just deleting the old turret, especially with laser beam attacks
                 //current_turret_pivot.SetParent(null);
