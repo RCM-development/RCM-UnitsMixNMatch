@@ -43,6 +43,9 @@ namespace RCM_UnitsMixNMatch
         // list are ignored so external mods can't bypass MixNMatchUnits.txt
         public static Func<string, string> DonorSelector;
         public static IReadOnlyCollection<string> SupportedEntities => supported_entities;
+
+        // scale transplanted turrets so their footprint roughly matches the turret they replace
+        public static bool ScaleTransplantedTurrets = true;
         void LoadEntityCompatibilityList(){
             supported_entities.Clear();
             if (File.Exists(supported_entities_path)){
@@ -120,6 +123,33 @@ namespace RCM_UnitsMixNMatch
             return null;
         }
         
+        // uniform-scale the transplanted turret so its horizontal footprint roughly matches the
+        // old turret's. renderer AABBs instead of per-vertex bounds (cheap and good enough for
+        // a footprint), particles/trails ignored, a no-op deadzone because most turrets already
+        // fit reasonably, and a hard clamp so nothing degenerates
+        static void MatchTurretScale(Transform old_turret, Transform new_turret){
+            float old_size = HorizontalFootprint(old_turret);
+            float new_size = HorizontalFootprint(new_turret);
+            if (old_size < 0.001f || new_size < 0.001f) return;
+
+            float factor = old_size / new_size;
+            if (factor > 0.8f && factor < 1.25f) return; // fits well enough already
+            factor = Mathf.Clamp(factor, 0.5f, 2f);
+            new_turret.localScale *= factor;
+            RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1})");
+        }
+        static float HorizontalFootprint(Transform root){
+            bool has_bounds = false;
+            Bounds total = default;
+            foreach (var r in root.GetComponentsInChildren<Renderer>()){
+                if (!(r is MeshRenderer) && !(r is SkinnedMeshRenderer)) continue;
+                if (!has_bounds){ total = r.bounds; has_bounds = true; }
+                else total.Encapsulate(r.bounds);
+            }
+            if (!has_bounds) return 0f;
+            return Mathf.Max(total.size.x, total.size.z);
+        }
+
         public static bool IsChildOf(Transform child, Transform potentialParent){
             if (child == potentialParent) return true;
             Transform t = child;
@@ -300,6 +330,11 @@ namespace RCM_UnitsMixNMatch
                 frankenstien_pivot.SetParent(current_turret_pivot.parent);
                 frankenstien_pivot.position = current_turret_pivot.position;
                 frankenstien_pivot.rotation = current_turret_pivot.rotation;
+
+                // match the new turret's size to the one it replaces (measured before the old
+                // turret's renderers get disabled below)
+                if (ScaleTransplantedTurrets)
+                    MatchTurretScale(current_turret_pivot, frankenstien_pivot);
 
                 // there are a few things i haven't fixed that prevent us from just deleting the old turret, especially with laser beam attacks
                 //current_turret_pivot.SetParent(null);
