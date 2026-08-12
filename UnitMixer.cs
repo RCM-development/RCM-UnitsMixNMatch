@@ -316,9 +316,11 @@ namespace RCM_UnitsMixNMatch
                 Transform current_turret_pivot = GetPivotFromAiming(__instance.aiming);
                 if (current_turret_pivot == null) return true; // this shouldn't be possible but as a failsafe...
 
-                // remove current aiming components from original entity
-                var comps = __instance.gameObject.GetComponents<SingleTargetAction>();
-                foreach (var comp in comps) GameObject.Destroy(comp);
+                // snapshot the current aiming components but do NOT destroy them yet: if the donor
+                // turns out to use an unsupported aiming type the clone below throws, and a unit
+                // whose aiming was already destroyed never turns towards enemies again (planter
+                // turret bug). they get destroyed only after the clone succeeded
+                var old_aiming_comps = __instance.gameObject.GetComponents<SingleTargetAction>();
 
                 // grab another unit to frankenstien onto
                 // an external DonorSelector (e.g. a seeded randomizer) takes priority, otherwise
@@ -354,8 +356,19 @@ namespace RCM_UnitsMixNMatch
                 // copy all of the aiming components from the new turret to current unit
                 Transform frankenstien_pivot = GetPivotFromAiming(frankenstien_controller.aiming) ;
                 List<SingleTargetAction> new_aiming_components = new List<SingleTargetAction>();
-                CloneAimingComponentsTo(__instance, new_aiming_components, frankenstien_controller.aiming);
-                if (new_aiming_components.Count == 0)       
+                try{
+                    if (frankenstien_pivot == null) throw new InvalidOperationException("no usable pivot on donor");
+                    CloneAimingComponentsTo(__instance, new_aiming_components, frankenstien_controller.aiming);
+                } catch (Exception e){
+                    // donor not swappable: clean up whatever was half-built and leave the unit stock
+                    foreach (var added in new_aiming_components) GameObject.Destroy(added);
+                    GameObject.Destroy(frankenstien_entity_obj);
+                    RCMManager.Log("skipping swap for " + __instance.entityId + " <- " + frankenstien_id + ": " + e.Message);
+                    return true;
+                }
+                // clone succeeded: NOW retire the old aiming components
+                foreach (var comp in old_aiming_comps) GameObject.Destroy(comp);
+                if (new_aiming_components.Count == 0)
                     __instance.aiming = null;
                 else if (new_aiming_components.Count == 1)  
                     __instance.aiming = new_aiming_components[0];
