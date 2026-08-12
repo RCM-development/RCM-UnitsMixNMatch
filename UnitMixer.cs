@@ -124,6 +124,30 @@ namespace RCM_UnitsMixNMatch
             return false;
         }
 
+        public static AudioSource CopyAudioSource(AudioSource from, GameObject to){
+            AudioSource a = to.AddComponent<AudioSource>();
+            a.clip = from.clip;
+            a.outputAudioMixerGroup = from.outputAudioMixerGroup;
+            a.volume = from.volume;
+            a.pitch = from.pitch;
+            a.panStereo = from.panStereo;
+            a.spatialBlend = from.spatialBlend;
+            a.reverbZoneMix = from.reverbZoneMix;
+            a.loop = from.loop;
+            a.mute = from.mute;
+            a.playOnAwake = from.playOnAwake;
+            a.bypassEffects = from.bypassEffects;
+            a.bypassListenerEffects = from.bypassListenerEffects;
+            a.bypassReverbZones = from.bypassReverbZones;
+            a.priority = from.priority;
+            a.dopplerLevel = from.dopplerLevel;
+            a.spread = from.spread;
+            a.minDistance = from.minDistance;
+            a.maxDistance = from.maxDistance;
+            return a;
+        }
+
+
 
         // this hook is called when a unit is created & manually initialized via the game, usually happening a few lines after the instantiation
         [HarmonyPatch(typeof(EntityController), "Init")]
@@ -150,10 +174,11 @@ namespace RCM_UnitsMixNMatch
                 GameObject frankenstien_entity_obj = (GameObject)GameObject.Instantiate(Resources.Load(EntityBalancingStore.PrefabLocation(frankenstien_id)), new Vector3(0, 0, 0), Quaternion.identity);
                 EntityController frankenstien_controller = frankenstien_entity_obj.GetComponent<EntityController>();
 
-                // NOTE: for now we have to delete all of these components on the new turret because they have references that escape the turret gameobject
-                // we could fix these up to reference the `__instance` variable instead, but haven't tested if this works or not
+                // hoping that this works out of the box, if not then we have to delete the scalables
                 ScaleByChangeableValue[] scaleables = frankenstien_entity_obj.GetComponentsInChildren<ScaleByChangeableValue>();
-                foreach (var scaleable in scaleables) GameObject.Destroy (scaleable);
+                foreach (var scaleable in scaleables)
+                    scaleable.entityController = __instance;
+                    //GameObject.Destroy (scaleable);
 
                 // copy all of the aiming components from the new turret to current unit
                 Transform frankenstien_pivot = GetPivotFromAiming(frankenstien_controller.aiming) ;
@@ -169,18 +194,11 @@ namespace RCM_UnitsMixNMatch
                     __instance.aiming = new_action;
                 }
 
-                // here we scrape the firing point and any useful animations from frankenstien controller to add to the current unit
-                // also we copy the projectile firing event from here, it doesn't work perfect at the moment though
-                Transform new_turrets_firingpoint = null;
-                ShootProjectile new_fire_event = null;
-                void ScrapeActionData(EntityEvent _event, IEntityAction action){
-                    if (action.GetType() == typeof(ShootProjectile)){
-                        ShootProjectile fireProjectileAction = (ShootProjectile)action;
-                        new_turrets_firingpoint = fireProjectileAction.firePointsTransform;
-                        if (new_fire_event == null || _event.@event == EntityController.Event.OnReadyToShoot)
-                            new_fire_event = fireProjectileAction;
-
-                    } else if (action.GetType() == typeof(Animate)){
+                // here we cleanup animations to remove any extra references, and then add them to our new unit
+                // NOTE: most of the animations that we give to the root unit will be overwritten anyway since we're blanket overwriting all shooting events
+                // however this is just so extra potentially non-shooting animations can get through. IE skill activation could have the turret play its animation and such
+                void FixupFrankenstienAnimations(EntityEvent _event, IEntityAction action){
+                    if (action.GetType() == typeof(Animate)){
                         Animate animateAction = (Animate)action;
                         // basically remove this action from the frankenstien unit and give it to our actual unit
                         // so we look through all the animations to find ones that reference to the turret
@@ -218,29 +236,138 @@ namespace RCM_UnitsMixNMatch
                 foreach (var _event in frankenstien_controller.events){
                     foreach (var conditional_action in _event.conditionalActions)
                         foreach (var action in conditional_action.actions)
-                            ScrapeActionData(_event, action);
+                            FixupFrankenstienAnimations(_event, action);
                     foreach (var action in _event.actions)
-                        ScrapeActionData(_event, action);
+                        FixupFrankenstienAnimations(_event, action);
                 }
-                // now assign firing point, if none then just make it something attached to the unit (so our new turret)
-                if (new_turrets_firingpoint == null) new_turrets_firingpoint = frankenstien_pivot;
 
 
-                bool should_inherit_projectile = true;
-                bool CheckCopyShootLogic(IEntityAction action){
-                    if (action.GetType() == typeof(ShootProjectile)){
-                        ShootProjectile fireProjectileAction = (ShootProjectile)action;
-                        if (should_inherit_projectile && new_fire_event != null){
-                            new_fire_event.chooseTargetFromEntityIdentifier = false;
-                            new_fire_event.multipleTargetEntityIdentifier = "";
-                            if (!IsChildOf(new_fire_event.shotSoundAudioSource.transform, frankenstien_pivot))
-                                new_fire_event.shotSoundAudioSource = fireProjectileAction.shotSoundAudioSource;
-                            return true;
-                        }
-                        else fireProjectileAction.firePointsTransform = new_turrets_firingpoint;
+                // now we delete & replace our new unit's shooting related events
+                for (int i = 0; i < __instance.events.Count; i++){
+                    switch (__instance.events[i].@event){
+                        case EntityController.Event.OnAttackHitTarget:
+                        case EntityController.Event.OnAttackMissedTarget:
+                        case EntityController.Event.OnAttackWarmUpStarted:
+                        case EntityController.Event.OnHasShot:
+                        case EntityController.Event.OnReadyToShoot:
+                            __instance.events.RemoveAt(i);
+                            i--;
+                            break;
+                        default: break;
                     }
-                    return false;
                 }
+
+                // copy over entity identifiers
+                // TODO: we might have to adjust the teams for the identifier??
+                foreach (EntityIdentifier ident in frankenstien_controller.EntityIdentifiers){
+                    bool already_exists = false;
+                    foreach (EntityIdentifier our_ident in __instance.EntityIdentifiers)
+                        if (ident.name == our_ident.name)
+                            already_exists = true;
+                    
+                    if (!already_exists)
+                        __instance.EntityIdentifiers.Add(ident);
+                }
+
+
+                // helper func for if object is referenced by the an action but not apart of the turret, we check if its a top level child and migrate it to this object if it is
+                bool IsChildOfOrCopyTopLevelChild(Transform t, bool force_copy_obj = false){
+                    if (t == null) return false;
+                    if (!IsChildOf(t, frankenstien_pivot)){
+                        if (t.parent == frankenstien_entity_obj.transform || force_copy_obj)
+                            t.SetParent(__instance.gameObject.transform);
+                        // we then have to make sure this object hasn't already been migrated to our new unit
+                        else return IsChildOf(t, __instance.gameObject.transform);
+                    }
+                    return true;
+                }
+                // now give new shooting events & fix them up where needed
+                void FixupFiringActions(IEntityAction action){
+                    // note: animate actions already updated above
+                    if (action.GetType() == typeof(ShootProjectile)){
+                        ShootProjectile typed_action = (ShootProjectile)action;
+                        // either null out entity identifiers or copy them over from frankenstien unit, although not sure what this even does
+                        // TODO: we will probably have to update each ones target indentifier to alter which team it targets, as if we copy an identifier from the PCX it likely wont beable to attack anything
+                        //if (typed_action.chooseTargetFromEntityIdentifier){
+                        //    RCMManager.Log("had to clear entity shooting targeting params off of unit \""+ typed_action.multipleTargetEntityIdentifier + "\"" + __instance.entityId + "->" + frankenstien_id + "");
+                        //    typed_action.chooseTargetFromEntityIdentifier = false;
+                        //    typed_action.multipleTargetEntityIdentifier = "";
+                        //}
+                        // not sure if this is needed but i suspect there would be problems otherwise
+                        if (typed_action.shotSoundAudioSource != null)
+                            typed_action.shotSoundAudioSource = CopyAudioSource(typed_action.shotSoundAudioSource, __instance.gameObject);
+                    }
+                    else if (action.GetType() == typeof(EnableDisable)){
+                        EnableDisable typed_action = (EnableDisable)action;
+                        if (!IsChildOfOrCopyTopLevelChild(typed_action.gameObject?.transform)) typed_action.gameObject = null;
+                        if (!IsChildOfOrCopyTopLevelChild(typed_action.behaviour?.gameObject?.transform)) typed_action.behaviour = null;
+                        if (!IsChildOfOrCopyTopLevelChild(typed_action.renderer?.gameObject?.transform)) typed_action.renderer = null;
+                        if (!IsChildOfOrCopyTopLevelChild(typed_action.collider?.gameObject?.transform)) typed_action.collider = null;
+                    }
+                    else if (action.GetType() == typeof(SpawnObject)){
+                        SpawnObject typed_action = (SpawnObject)action;
+                        //if (typed_action.operatingEntities == MultipleEntitiesActionWithoutUpdate.OperatingEntities.Identified){
+                        //    RCMManager.Log("had to clear entity spawnobject targeting params off of unit \""+ typed_action.entityIdentifierWithTargetAsOrigin + "\"" + __instance.entityId + "->" + frankenstien_id + "");
+                        //    typed_action.operatingEntities = MultipleEntitiesActionWithoutUpdate.OperatingEntities.Self;
+                        //    typed_action.entityIdentifierWithTargetAsOrigin = "";
+                        //}
+                        if (typed_action.startingPosition == SpawnObject.StartingPosition.Transform){
+                            if (!IsChildOfOrCopyTopLevelChild(typed_action.startingPositionTransform)){
+                                typed_action.startingPosition = SpawnObject.StartingPosition.Self;
+                                typed_action.startingPositionTransform = null;
+                            }
+                        }
+                    }
+                    else if (action.GetType() == typeof(DealDamage)){
+                        DealDamage typed_action = (DealDamage)action;
+                        //if (typed_action.operatingEntities == MultipleEntitiesActionWithoutUpdate.OperatingEntities.Identified){
+                        //    RCMManager.Log("had to clear entity dealdamage targeting params off of unit \""+ typed_action.entityIdentifierWithTargetAsOrigin + "\"" + __instance.entityId + "->" + frankenstien_id + "");
+                        //    typed_action.operatingEntities = MultipleEntitiesActionWithoutUpdate.OperatingEntities.Self;
+                        //    typed_action.entityIdentifierWithTargetAsOrigin = "";
+                        //}
+                    }
+                    else if (action.GetType() == typeof(DealDamageAdvanced)){
+                        DealDamageAdvanced typed_action = (DealDamageAdvanced)action;
+                        //if (typed_action.operatingEntities == MultipleEntitiesActionWithoutUpdate.OperatingEntities.Identified){
+                        //    RCMManager.Log("had to clear entity dealdamageadvanced targeting params off of unit \""+ typed_action.entityIdentifierWithTargetAsOrigin + "\"" + __instance.entityId + "->" + frankenstien_id + "");
+                        //    typed_action.operatingEntities = MultipleEntitiesActionWithoutUpdate.OperatingEntities.Self;
+                        //    typed_action.entityIdentifierWithTargetAsOrigin = "";
+                        //}
+                    }
+                    else if (action.GetType() == typeof(ConfigureLineRenderer)){
+                        ConfigureLineRenderer typed_action = (ConfigureLineRenderer)action;
+                        if (!IsChildOfOrCopyTopLevelChild(typed_action.lineRenderer?.gameObject?.transform, true)) typed_action.lineRenderer = null;
+                    }
+                    else if (action.GetType() == typeof(ConfigureLineRendererForUseWithEntityIdentifier)){
+                        ConfigureLineRendererForUseWithEntityIdentifier typed_action = (ConfigureLineRendererForUseWithEntityIdentifier)action;
+                        if (!IsChildOfOrCopyTopLevelChild(typed_action.lineRenderer?.gameObject?.transform, true)) typed_action.lineRenderer = null;
+                        //if (typed_action.operatingEntities == MultipleEntitiesActionWithoutUpdate.OperatingEntities.Identified){
+                        //    RCMManager.Log("had to clear entity confiurelinerender-entiityident targeting params off of unit \""+ typed_action.entityIdentifierWithTargetAsOrigin + "\"" + __instance.entityId + "->" + frankenstien_id + "");
+                        //    typed_action.operatingEntities = MultipleEntitiesActionWithoutUpdate.OperatingEntities.Self;
+                        //    typed_action.entityIdentifierWithTargetAsOrigin = "";
+                        //}
+                    }
+                }
+                foreach (var _event in frankenstien_controller.events){
+                    switch (_event.@event){
+                        case EntityController.Event.OnAttackHitTarget:
+                        case EntityController.Event.OnAttackMissedTarget:
+                        case EntityController.Event.OnAttackWarmUpStarted:
+                        case EntityController.Event.OnHasShot:
+                        case EntityController.Event.OnReadyToShoot:
+                            __instance.events.Add(_event);
+                            foreach (var conditional_action in _event.conditionalActions)
+                                foreach (var action in conditional_action.actions)
+                                    FixupFiringActions(action);
+                            foreach (var action in _event.actions)
+                                FixupFiringActions(action);
+                            break;
+                        default: break;
+                    }
+                }
+
+
+                // this is technically redundant as we dont destroy any of the turret pieces for now
                 bool CheckAndCleanAnimation(IEntityAction action){
                     if (action.GetType() == typeof(Animate)){
                         Animate fireProjectileAction = (Animate)action;
@@ -260,14 +387,10 @@ namespace RCM_UnitsMixNMatch
                     }
                     return false;
                 }
-
                 foreach (var _event in __instance.events){
                     foreach (var conditional_action in _event.conditionalActions){
                         for (int i = 0; i < conditional_action.actions.Count; i++){
                             var action = conditional_action.actions[i];
-                            // see comments below
-                            if (CheckCopyShootLogic(action))
-                                conditional_action.actions[i] = new_fire_event;
                             if (CheckAndCleanAnimation(action)){
                                 conditional_action.actions.RemoveAt(i);
                                 i--;
@@ -276,9 +399,6 @@ namespace RCM_UnitsMixNMatch
                     }
                     for (int i = 0; i < _event.actions.Count; i++){
                         var action = _event.actions[i];
-                        // if true, that means this action is suitable to be replaced by the found shoot action from the frankenstien turret
-                        if (CheckCopyShootLogic(action))
-                            _event.actions[i] = new_fire_event;
                         // if true, it means all the transforms in this action had to be removed as they all referenced parts of the old turret that we want to remove
                         if (CheckAndCleanAnimation(action)){
                             _event.actions.RemoveAt(i);
