@@ -140,6 +140,17 @@ namespace RCM_UnitsMixNMatch
             new_turret.localScale *= factor;
             RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1})");
         }
+        // unclamped variant for display models (cards, placement ghosts): the scale gap between
+        // a card-scaled chassis and a world-scale donor is huge and entirely legitimate there
+        static void MatchTurretScaleExact(Transform old_turret, Transform new_turret){
+            float old_size = HorizontalFootprint(old_turret);
+            float new_size = HorizontalFootprint(new_turret);
+            if (old_size < 0.0001f || new_size < 0.0001f) return;
+            float factor = 0.85f * old_size / new_size; // slightly snug, like the in-world target
+            if (factor > 0.95f && factor < 1.05f) return;
+            new_turret.localScale *= factor;
+        }
+
         static float HorizontalFootprint(Transform root){
             if (!TryGetMeshBounds(root, out Bounds total)) return 0f;
             // height counts too: a tower of a turret on a flat chassis looks as wrong as a wide one
@@ -222,7 +233,9 @@ namespace RCM_UnitsMixNMatch
                     if (comp is Transform || comp is MeshFilter || comp is MeshRenderer || comp is SkinnedMeshRenderer) continue;
                     GameObject.Destroy(comp);
                 }
-                if (ScaleTransplantedTurrets) MatchTurretScale(old_pivot, new_pivot);
+                // display models are card-scaled while the donor spawned at world scale, so the
+                // needed factor sits far outside the in-world clamp: match exactly here
+                MatchTurretScaleExact(old_pivot, new_pivot);
                 AlignTransplantedTurret(old_pivot, new_pivot);
                 // match the display layer or the card/preview camera won't render it
                 int display_layer = old_pivot.gameObject.layer;
