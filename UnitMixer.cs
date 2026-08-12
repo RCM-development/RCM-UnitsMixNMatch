@@ -134,7 +134,7 @@ namespace RCM_UnitsMixNMatch
 
             float factor = old_size / new_size;
             if (factor > 0.8f && factor < 1.25f) return; // fits well enough already
-            factor = Mathf.Clamp(factor, 0.5f, 2f);
+            factor = Mathf.Clamp(factor, 0.35f, 2.5f);
             new_turret.localScale *= factor;
             RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1})");
         }
@@ -158,13 +158,27 @@ namespace RCM_UnitsMixNMatch
 
         static bool TryGetMeshBounds(Transform root, out Bounds total){
             total = default;
-            bool has_bounds = false;
+            List<Bounds> parts = new List<Bounds>();
             foreach (var r in root.GetComponentsInChildren<Renderer>()){
                 if (!(r is MeshRenderer) && !(r is SkinnedMeshRenderer)) continue;
-                if (!has_bounds){ total = r.bounds; has_bounds = true; }
-                else total.Encapsulate(r.bounds);
+                if (!r.enabled) continue;
+                parts.Add(r.bounds);
             }
-            return has_bounds;
+            if (parts.Count == 0) return false;
+
+            // beam/effect meshes are stretched towards their target and report enormous world
+            // bounds (one turret measured 215657 units), which would wreck scale & alignment.
+            // so drop anything far bigger than the typical part before combining
+            List<float> sizes = parts.Select(b => Mathf.Max(b.size.x, b.size.y, b.size.z)).OrderBy(v => v).ToList();
+            float limit = Mathf.Max(0.001f, sizes[sizes.Count / 2] * 4f);
+            bool has_bounds = false;
+            foreach (var b in parts){
+                if (Mathf.Max(b.size.x, b.size.y, b.size.z) > limit) continue;
+                if (!has_bounds){ total = b; has_bounds = true; }
+                else total.Encapsulate(b);
+            }
+            if (!has_bounds) total = parts[0];
+            return true;
         }
 
         public static bool IsChildOf(Transform child, Transform potentialParent){
