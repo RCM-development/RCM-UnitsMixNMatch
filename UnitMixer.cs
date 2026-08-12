@@ -39,8 +39,9 @@ namespace RCM_UnitsMixNMatch
         static HashSet<string> supported_entities = new HashSet<string>();
 
         // hook for other mods (e.g. RCM_Randomizer): return a donor entityId for the given base entity,
-        // or null to fall back to the built-in per-spawn random pick. selections outside the compat
-        // list are ignored so external mods can't bypass MixNMatchUnits.txt
+        // null to fall back to the built-in per-spawn random pick, or "" to skip mixing this
+        // entity entirely (e.g. neutral wildlife). selections outside the compat list are ignored
+        // so external mods can't bypass MixNMatchUnits.txt
         public static Func<string, string> DonorSelector;
         public static IReadOnlyCollection<string> SupportedEntities => supported_entities;
 
@@ -208,7 +209,7 @@ namespace RCM_UnitsMixNMatch
                     if (__result == null || DonorSelector == null) return;
                     if (!supported_entities.Contains(entityId)) return;
                     string donor_id = DonorSelector(entityId);
-                    if (donor_id == null || !supported_entities.Contains(donor_id)) return;
+                    if (string.IsNullOrEmpty(donor_id) || !supported_entities.Contains(donor_id)) return;
                     ApplyVisualSwap(__result, donor_id);
                 } catch (Exception e){ RCMManager.Log("preview turret swap failed: " + e.Message); }
             }
@@ -304,6 +305,7 @@ namespace RCM_UnitsMixNMatch
                 // an external DonorSelector (e.g. a seeded randomizer) takes priority, otherwise
                 // fall back to the built-in per-spawn random pick
                 string frankenstien_id = DonorSelector?.Invoke(__instance.entityId);
+                if (frankenstien_id == "") return true; // selector opted this entity out of mixing
                 if (frankenstien_id == null || !supported_entities.Contains(frankenstien_id))
                     frankenstien_id = GetRandomSupportedEntity();
                 RCMManager.Log("mixing units, base entityID: " + __instance.entityId + ", turret from: " + frankenstien_id);
