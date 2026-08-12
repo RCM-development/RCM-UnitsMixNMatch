@@ -220,6 +220,18 @@ namespace RCM_UnitsMixNMatch
                 GameObject frankenstien_entity_obj = (GameObject)GameObject.Instantiate(Resources.Load(EntityBalancingStore.PrefabLocation(frankenstien_id)), new Vector3(0, 0, 0), Quaternion.identity);
                 EntityController frankenstien_controller = frankenstien_entity_obj.GetComponent<EntityController>();
 
+                // whether a unit charges in or shoots from afar belongs to the weapon, not the chassis:
+                // a transplanted melee weapon (poker) on a ranged chassis would otherwise be swung
+                // from across the map. Init builds EntityAttack from these fields right after this
+                // prefix, so setting them here is enough. the extension is padded a little because
+                // the new chassis reaches from its own collision radius
+                if (__instance.melee != frankenstien_controller.melee)
+                    RCMManager.Log("weapon is " + (frankenstien_controller.melee ? "melee" : "ranged") + ", switching " + __instance.entityId + " to match");
+                __instance.melee = frankenstien_controller.melee;
+                __instance.meleeRadiusExtension = frankenstien_controller.melee
+                    ? frankenstien_controller.meleeRadiusExtension + 0.5f
+                    : frankenstien_controller.meleeRadiusExtension;
+
                 // NOTE: for now we have to delete all of these components on the new turret because they have references that escape the turret gameobject
                 // we could fix these up to reference the `__instance` variable instead, but haven't tested if this works or not
                 ScaleByChangeableValue[] scaleables = frankenstien_entity_obj.GetComponentsInChildren<ScaleByChangeableValue>();
