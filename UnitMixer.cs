@@ -139,15 +139,32 @@ namespace RCM_UnitsMixNMatch
             RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1})");
         }
         static float HorizontalFootprint(Transform root){
+            if (!TryGetMeshBounds(root, out Bounds total)) return 0f;
+            return Mathf.Max(total.size.x, total.size.z);
+        }
+
+        // the swap positions the donor PIVOT at the old pivot, but a donor's mesh can sit far away
+        // from its own pivot (tall donor chassis), leaving the gun floating next to the new body.
+        // so move the transplanted pivot until the new turret's mesh sits where the old one's was:
+        // centered on it horizontally, resting at the same base height
+        static void AlignTransplantedTurret(Transform old_turret, Transform new_turret){
+            if (!TryGetMeshBounds(old_turret, out Bounds old_b) || !TryGetMeshBounds(new_turret, out Bounds new_b)) return;
+            Vector3 target = new Vector3(old_b.center.x, old_b.min.y + new_b.extents.y, old_b.center.z);
+            Vector3 offset = target - new_b.center;
+            if (offset.sqrMagnitude < 0.0001f) return;
+            new_turret.position += offset;
+            RCMManager.Log($"aligned transplanted turret by {offset.magnitude:F2}");
+        }
+
+        static bool TryGetMeshBounds(Transform root, out Bounds total){
+            total = default;
             bool has_bounds = false;
-            Bounds total = default;
             foreach (var r in root.GetComponentsInChildren<Renderer>()){
                 if (!(r is MeshRenderer) && !(r is SkinnedMeshRenderer)) continue;
                 if (!has_bounds){ total = r.bounds; has_bounds = true; }
                 else total.Encapsulate(r.bounds);
             }
-            if (!has_bounds) return 0f;
-            return Mathf.Max(total.size.x, total.size.z);
+            return has_bounds;
         }
 
         public static bool IsChildOf(Transform child, Transform potentialParent){
@@ -331,10 +348,11 @@ namespace RCM_UnitsMixNMatch
                 frankenstien_pivot.position = current_turret_pivot.position;
                 frankenstien_pivot.rotation = current_turret_pivot.rotation;
 
-                // match the new turret's size to the one it replaces (measured before the old
-                // turret's renderers get disabled below)
+                // match the new turret's size to the one it replaces, then align the meshes
+                // (both measured before the old turret's renderers get disabled below)
                 if (ScaleTransplantedTurrets)
                     MatchTurretScale(current_turret_pivot, frankenstien_pivot);
+                AlignTransplantedTurret(current_turret_pivot, frankenstien_pivot);
 
                 // there are a few things i haven't fixed that prevent us from just deleting the old turret, especially with laser beam attacks
                 //current_turret_pivot.SetParent(null);
