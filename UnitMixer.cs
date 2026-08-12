@@ -132,15 +132,18 @@ namespace RCM_UnitsMixNMatch
             float new_size = HorizontalFootprint(new_turret);
             if (old_size < 0.001f || new_size < 0.001f) return;
 
-            float factor = old_size / new_size;
-            if (factor > 0.8f && factor < 1.25f) return; // fits well enough already
+            // aim slightly SMALLER than the old turret: a snug gun reads better than a bulky one,
+            // and oversized turrets were the main visual complaint
+            float factor = old_size / new_size * 0.85f;
+            if (factor > 0.9f && factor < 1.1f) return; // fits well enough already
             factor = Mathf.Clamp(factor, 0.35f, 2.5f);
             new_turret.localScale *= factor;
             RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1})");
         }
         static float HorizontalFootprint(Transform root){
             if (!TryGetMeshBounds(root, out Bounds total)) return 0f;
-            return Mathf.Max(total.size.x, total.size.z);
+            // height counts too: a tower of a turret on a flat chassis looks as wrong as a wide one
+            return Mathf.Max(total.size.x, total.size.z, total.size.y * 0.8f);
         }
 
         // the swap positions the donor PIVOT at the old pivot, but a donor's mesh can sit far away
@@ -179,6 +182,57 @@ namespace RCM_UnitsMixNMatch
             }
             if (!has_bounds) total = parts[0];
             return true;
+        }
+
+        // Card models and building placement previews come from EntityFactory.CreateEntityMesh.
+        // When an external DonorSelector is set (stable per-run donors), transplant the donor
+        // turret onto those display models too, so the blueprint card shows the actual unit.
+        // The EntityController on the display model is Destroy()ed by CreateEntityMesh but that
+        // is deferred, so it is still readable this frame.
+        [HarmonyPatch(typeof(EntityFactory), "CreateEntityMesh")]
+        public static class Patch_EntityFactory_CreateEntityMesh{
+            [HarmonyPostfix]
+            public static void Postfix(string entityId, GameObject __result){
+                try{
+                    if (__result == null || DonorSelector == null) return;
+                    if (!supported_entities.Contains(entityId)) return;
+                    string donor_id = DonorSelector(entityId);
+                    if (donor_id == null || !supported_entities.Contains(donor_id)) return;
+                    ApplyVisualSwap(__result, donor_id);
+                } catch (Exception e){ RCMManager.Log("preview turret swap failed: " + e.Message); }
+            }
+        }
+        static void ApplyVisualSwap(GameObject display_model, string donor_id){
+            EntityController display_controller = display_model.GetComponent<EntityController>();
+            if (display_controller == null || display_controller.aiming == null || display_controller.skillAiming != null) return;
+            Transform old_pivot = GetPivotFromAiming(display_controller.aiming);
+            if (old_pivot == null) return;
+
+            GameObject donor_obj = (GameObject)GameObject.Instantiate(Resources.Load(EntityBalancingStore.PrefabLocation(donor_id)), new Vector3(0, 0, 0), Quaternion.identity);
+            try{
+                EntityController donor_controller = donor_obj.GetComponent<EntityController>();
+                Transform new_pivot = (donor_controller == null || donor_controller.aiming == null) ? null : GetPivotFromAiming(donor_controller.aiming);
+                if (new_pivot == null) return;
+
+                new_pivot.SetParent(old_pivot.parent);
+                new_pivot.position = old_pivot.position;
+                new_pivot.rotation = old_pivot.rotation;
+                // display model only: strip everything but the meshes so nothing ticks or reacts
+                foreach (var comp in new_pivot.GetComponentsInChildren<Component>(true)){
+                    if (comp is Transform || comp is MeshFilter || comp is MeshRenderer || comp is SkinnedMeshRenderer) continue;
+                    GameObject.Destroy(comp);
+                }
+                if (ScaleTransplantedTurrets) MatchTurretScale(old_pivot, new_pivot);
+                AlignTransplantedTurret(old_pivot, new_pivot);
+                // match the display layer or the card/preview camera won't render it
+                int display_layer = old_pivot.gameObject.layer;
+                foreach (var t in new_pivot.GetComponentsInChildren<Transform>(true)) t.gameObject.layer = display_layer;
+
+                foreach (var r in old_pivot.GetComponentsInChildren<Renderer>()) r.enabled = false;
+                foreach (var p in old_pivot.GetComponentsInChildren<ParticleSystem>()) p.gameObject.SetActive(false);
+            } finally{
+                GameObject.Destroy(donor_obj);
+            }
         }
 
         public static bool IsChildOf(Transform child, Transform potentialParent){
