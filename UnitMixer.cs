@@ -111,6 +111,14 @@ namespace RCM_UnitsMixNMatch
 
             } else throw new InvalidOperationException("Unsupported aiming type ");
         }
+        // Which transform a single (already flattened) aiming action actually drives.
+        static Transform TransformRotatedBy(SingleTargetAction aiming){
+            if (aiming is RotateInSingleTargetDirectionAroundAxisAction around) return around.transformToRotate;
+            if (aiming is RotateInSingleTargetDirectionAction direction) return direction.transformToRotate;
+            if (aiming is RotateToBallisticAngleSingleTargetAction ballistic) return ballistic.transformToRotate;
+            return null;
+        }
+
         static Transform GetPivotFromAiming(SingleTargetAction aiming){
             if (aiming.GetType() == typeof(SerialSingleTargetAction)) {
                 SerialSingleTargetAction serialAction = (SerialSingleTargetAction)aiming;
@@ -399,6 +407,18 @@ namespace RCM_UnitsMixNMatch
                 try{
                     if (frankenstien_pivot == null) throw new InvalidOperationException("no usable pivot on donor");
                     CloneAimingComponentsTo(__instance, new_aiming_components, frankenstien_controller.aiming);
+                    // Aiming components hold a DIRECT reference to the transform they rotate. Only
+                    // the pivot subtree gets reparented onto us; anything the donor aimed outside it
+                    // (a hull that turns to face, a second mount) dies with frankenstien_entity_obj
+                    // below, and the cloned action then throws every frame it tries to aim. Refuse
+                    // the donor instead - a stock unit beats a unit that screams into the log.
+                    foreach (var cloned in new_aiming_components){
+                        Transform rotates = TransformRotatedBy(cloned);
+                        if (rotates == null)
+                            throw new InvalidOperationException("cloned aiming has no transform to rotate");
+                        if (!IsChildOf(rotates, frankenstien_pivot))
+                            throw new InvalidOperationException("donor aims '" + rotates.name + "' from outside its turret pivot");
+                    }
                 } catch (Exception e){
                     // donor not swappable: clean up whatever was half-built and leave the unit stock
                     foreach (var added in new_aiming_components) GameObject.Destroy(added);
