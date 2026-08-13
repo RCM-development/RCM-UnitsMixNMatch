@@ -307,10 +307,12 @@ namespace RCM_UnitsMixNMatch
             [HarmonyPrefix]
             public static bool Prefix(EntityController __instance, EntityController originEntity){
                 if (__instance.aiming == null 
-                ||  __instance.skillAiming != null // skip units with skill aiming because im not sure if those units cause issues, technically this is a redundant check as we've already removed from unit compat txt
                 || !supported_entities.Contains(__instance.entityId)) return true;
 
                 var swap_timer = StartTiming();
+
+                // just outright remove skill aiming so we dont get any weird stuff
+                __instance.skillAiming = null;
 
                 // get current turret object from current unit
                 Transform current_turret_pivot = GetPivotFromAiming(__instance.aiming);
@@ -448,9 +450,14 @@ namespace RCM_UnitsMixNMatch
                     foreach (EntityIdentifier our_ident in __instance.EntityIdentifiers)
                         if (ident.name == our_ident.name)
                             already_exists = true;
-                    
-                    if (!already_exists)
+                    if (!already_exists){
                         __instance.EntityIdentifiers.Add(ident);
+                        if (!IsChildOfOrCopyTopLevelChild(ident.scaledOverlapBox?.gameObject?.transform, true)){
+                            ident.scaledOverlapBox = null;
+                            ident.radius = EntityIdentifier.Radius.SelfWeaponRange;
+                            RCMManager.Log("had to null out scaled overlap box on entity ident: '" + ident.name + "' from: " + __instance.entityId + " <- " + frankenstien_id);
+                        }
+                    }
                 }
 
 
