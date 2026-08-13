@@ -131,28 +131,64 @@ namespace RCM_UnitsMixNMatch
         // old turret's. renderer AABBs instead of per-vertex bounds (cheap and good enough for
         // a footprint), particles/trails ignored, a no-op deadzone because most turrets already
         // fit reasonably, and a hard clamp so nothing degenerates
+        // The one rule for how big a transplanted turret gets. Aims slightly SMALLER than the old
+        // turret (a snug gun reads better than a bulky one), leaves a good-enough fit alone, and
+        // CLAMPS so a wildly mismatched donor cannot take over the silhouette. Returns the factor
+        // instead of applying it, so the preview path can reason about it rather than re-derive it.
+        public static float TurretScaleFactor(float old_size, float new_size){
+            if (old_size < 0.001f || new_size < 0.001f) return 1f;
+            float factor = old_size / new_size * 0.85f;
+            if (factor > 0.9f && factor < 1.1f) return 1f; // fits well enough already
+            return Mathf.Clamp(factor, 0.35f, 2.5f);
+        }
+
         static void MatchTurretScale(Transform old_turret, Transform new_turret){
             float old_size = HorizontalFootprint(old_turret);
             float new_size = HorizontalFootprint(new_turret);
-            if (old_size < 0.001f || new_size < 0.001f) return;
-
-            // aim slightly SMALLER than the old turret: a snug gun reads better than a bulky one,
-            // and oversized turrets were the main visual complaint
-            float factor = old_size / new_size * 0.85f;
-            if (factor > 0.9f && factor < 1.1f) return; // fits well enough already
-            factor = Mathf.Clamp(factor, 0.35f, 2.5f);
+            float factor = TurretScaleFactor(old_size, new_size);
+            if (Mathf.Abs(factor - 1f) < 0.0001f) return;
             new_turret.localScale *= factor;
             RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1})");
         }
-        // unclamped variant for display models (cards, placement ghosts): the scale gap between
-        // a card-scaled chassis and a world-scale donor is huge and entirely legitimate there
-        static void MatchTurretScaleExact(Transform old_turret, Transform new_turret){
-            float old_size = HorizontalFootprint(old_turret);
-            float new_size = HorizontalFootprint(new_turret);
-            if (old_size < 0.0001f || new_size < 0.0001f) return;
-            float factor = 0.85f * old_size / new_size; // slightly snug, like the in-world target
-            if (factor > 0.95f && factor < 1.05f) return;
+
+        // Previews are the same swap seen through a card-scaled hierarchy, and they have to show
+        // the unit the player will actually get. Fitting the donor exactly to the card's own turret
+        // was wrong: the in-world factor is CLAMPED, so a donor that could not be grown enough on
+        // the battlefield still appeared perfectly fitted on the card, and the card read as a
+        // different unit. Reproduce the WORLD proportions instead — take the factor the in-world
+        // swap uses, measured on world-scale prefabs, and carry it into this hierarchy through the
+        // card's own scale ratio.
+        static void MatchTurretScaleForPreview(string base_entity_id, Transform old_turret, Transform new_turret){
+            float card_old = HorizontalFootprint(old_turret);
+            float donor_size = HorizontalFootprint(new_turret); // donor is instantiated at world scale
+            float world_old = WorldTurretFootprint(base_entity_id);
+            if (card_old < 0.0001f || donor_size < 0.0001f || world_old < 0.0001f) return;
+
+            float world_factor = TurretScaleFactor(world_old, donor_size);
+            float factor = world_factor * (card_old / world_old); // card_old / world_old = the card's shrink
+            if (factor < 0.0001f) return;
             new_turret.localScale *= factor;
+        }
+
+        // Footprint of a unit's OWN turret at world scale, measured off the prefab. Cached: this
+        // costs an instantiate, and previews are rebuilt constantly as the player browses cards.
+        static readonly Dictionary<string, float> world_turret_footprint = new Dictionary<string, float>();
+        static float WorldTurretFootprint(string entity_id){
+            if (world_turret_footprint.TryGetValue(entity_id, out float cached)) return cached;
+            float size = 0f;
+            GameObject probe = null;
+            try{
+                var prefab = Resources.Load(EntityBalancingStore.PrefabLocation(entity_id));
+                if (prefab != null){
+                    probe = (GameObject)GameObject.Instantiate(prefab, new Vector3(0f, -10000f, 0f), Quaternion.identity);
+                    var controller = probe.GetComponent<EntityController>();
+                    Transform pivot = (controller == null || controller.aiming == null) ? null : GetPivotFromAiming(controller.aiming);
+                    if (pivot != null) size = HorizontalFootprint(pivot);
+                }
+            } catch (Exception e){ RCMManager.Log("world turret footprint failed for " + entity_id + ": " + e.Message); }
+            finally { if (probe != null) GameObject.Destroy(probe); }
+            world_turret_footprint[entity_id] = size;
+            return size;
         }
 
         static float HorizontalFootprint(Transform root){
@@ -214,7 +250,7 @@ namespace RCM_UnitsMixNMatch
                     string donor_id = DonorSelector(entityId);
                     if (string.IsNullOrEmpty(donor_id) || !supported_entities.Contains(donor_id)) return;
                     var timer = StartTiming();
-                    ApplyVisualSwap(__result, donor_id);
+                    ApplyVisualSwap(__result, entityId, donor_id);
                     ReportTiming(timer, "preview swap", entityId + " <- " + donor_id);
                 } catch (Exception e){ RCMManager.Log("preview turret swap failed: " + e.Message); }
             }
@@ -231,9 +267,13 @@ namespace RCM_UnitsMixNMatch
             if (ms >= LogSwapsSlowerThanMs)
                 RCMManager.Log($"MixNMatch PERF: {what} took {ms:F1}ms ({detail})");
         }
-        static void ApplyVisualSwap(GameObject display_model, string donor_id){
+        static void ApplyVisualSwap(GameObject display_model, string base_entity_id, string donor_id){
             EntityController display_controller = display_model.GetComponent<EntityController>();
-            if (display_controller == null || display_controller.aiming == null || display_controller.skillAiming != null) return;
+            // Deliberately NOT gated on skillAiming: the in-world swap now nulls it and mixes those
+            // units, so refusing them here would put a stock model on the card for a unit that
+            // spawns transplanted. Nothing on a display model aims anyway - it is stripped to
+            // meshes below - so the field has no meaning in this path.
+            if (display_controller == null || display_controller.aiming == null) return;
             Transform old_pivot = GetPivotFromAiming(display_controller.aiming);
             if (old_pivot == null) return;
 
@@ -251,9 +291,7 @@ namespace RCM_UnitsMixNMatch
                     if (comp is Transform || comp is MeshFilter || comp is MeshRenderer || comp is SkinnedMeshRenderer) continue;
                     GameObject.Destroy(comp);
                 }
-                // display models are card-scaled while the donor spawned at world scale, so the
-                // needed factor sits far outside the in-world clamp: match exactly here
-                MatchTurretScaleExact(old_pivot, new_pivot);
+                MatchTurretScaleForPreview(base_entity_id, old_pivot, new_pivot);
                 AlignTransplantedTurret(old_pivot, new_pivot);
                 // match the display layer or the card/preview camera won't render it
                 int display_layer = old_pivot.gameObject.layer;
