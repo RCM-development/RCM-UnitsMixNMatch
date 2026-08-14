@@ -139,24 +139,52 @@ namespace RCM_UnitsMixNMatch
         // old turret's. renderer AABBs instead of per-vertex bounds (cheap and good enough for
         // a footprint), particles/trails ignored, a no-op deadzone because most turrets already
         // fit reasonably, and a hard clamp so nothing degenerates
-        // The one rule for how big a transplanted turret gets. Aims slightly SMALLER than the old
-        // turret (a snug gun reads better than a bulky one), leaves a good-enough fit alone, and
-        // CLAMPS so a wildly mismatched donor cannot take over the silhouette. Returns the factor
-        // instead of applying it, so the preview path can reason about it rather than re-derive it.
-        public static float TurretScaleFactor(float old_size, float new_size){
+        // However snug the gun sits against the part it replaces, it must also fit the BODY it
+        // lands on: a turret bigger than its chassis reads as the chassis being an accessory of
+        // the gun (the harvester with a lance several times its own size).
+        const float ChassisCapRatio = 1.15f;
+
+        // The one rule for how big a transplanted turret gets. Aims SMALLER than the old turret (a
+        // snug gun reads better than a bulky one), leaves a good-enough fit alone, and clamps
+        // asymmetrically: growing is capped hard because a grown gun dominates the silhouette,
+        // shrinking barely at all - long lance donors legitimately need x0.15 to sit on a small
+        // bot, and the old 0.35 floor is exactly why they shipped oversized.
+        public static float TurretScaleFactor(float old_size, float new_size, float target = 0.85f){
             if (old_size < 0.001f || new_size < 0.001f) return 1f;
-            float factor = old_size / new_size * 0.85f;
+            float factor = old_size / new_size * target;
             if (factor > 0.9f && factor < 1.1f) return 1f; // fits well enough already
-            return Mathf.Clamp(factor, 0.35f, 2.5f);
+            return Mathf.Clamp(factor, 0.12f, 2.5f);
         }
 
-        static void MatchTurretScale(Transform old_turret, Transform new_turret){
+        static float ApplyChassisCap(float factor, float new_size, Transform unit_root, Transform exclude_a, Transform exclude_b){
+            if (!TryGetMeshBounds(unit_root, out Bounds chassis_b, exclude_a, exclude_b)) return factor;
+            float chassis = Mathf.Max(chassis_b.size.x, chassis_b.size.z);
+            if (chassis < 0.001f || new_size < 0.001f) return factor;
+            return Mathf.Min(factor, Mathf.Max(0.05f, ChassisCapRatio * chassis / new_size));
+        }
+
+        // Harvester-style bots aim with their whole upper body: the pivot the aiming drives IS the
+        // torso, so hiding it beheads the model (the reported headless harvester). A pivot that
+        // carries most of the unit's own silhouette is treated as structure: kept visible, with
+        // the donor gun seated on top of it instead of in its place.
+        static bool PivotIsStructural(Transform unit_root, Transform pivot, Transform donor_pivot){
+            if (!TryGetMeshBounds(pivot, out Bounds pivot_b)) return false;
+            if (!TryGetMeshBounds(unit_root, out Bounds unit_b, donor_pivot)) return false;
+            float pivot_size = Mathf.Max(pivot_b.size.x, pivot_b.size.z);
+            float unit_size = Mathf.Max(unit_b.size.x, unit_b.size.z);
+            return unit_size > 0.001f && pivot_size / unit_size > 0.55f;
+        }
+
+        static void MatchTurretScale(Transform old_turret, Transform new_turret, Transform unit_root, bool structural){
             float old_size = HorizontalFootprint(old_turret);
             float new_size = HorizontalFootprint(new_turret);
-            float factor = TurretScaleFactor(old_size, new_size);
+            // a gun RIDING the torso should stay clearly smaller than it; one REPLACING a turret
+            // matches it snugly
+            float factor = TurretScaleFactor(old_size, new_size, structural ? 0.6f : 0.85f);
+            factor = ApplyChassisCap(factor, new_size, unit_root, old_turret, new_turret);
             if (Mathf.Abs(factor - 1f) < 0.0001f) return;
             new_turret.localScale *= factor;
-            RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1})");
+            RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1}{(structural ? ", torso mount" : "")})");
         }
 
         // Previews are the same swap seen through a card-scaled hierarchy, and they have to show
@@ -164,26 +192,37 @@ namespace RCM_UnitsMixNMatch
         // was wrong: the in-world factor is CLAMPED, so a donor that could not be grown enough on
         // the battlefield still appeared perfectly fitted on the card, and the card read as a
         // different unit. Reproduce the WORLD proportions instead — take the factor the in-world
-        // swap uses, measured on world-scale prefabs, and carry it into this hierarchy through the
-        // card's own scale ratio.
-        static void MatchTurretScaleForPreview(string base_entity_id, Transform old_turret, Transform new_turret){
+        // swap uses (clamp, chassis cap and all), measured on world-scale prefabs, and carry it
+        // into this hierarchy through the card's own scale ratio.
+        static void MatchTurretScaleForPreview(string base_entity_id, Transform old_turret, Transform new_turret, bool structural){
             float card_old = HorizontalFootprint(old_turret);
             float donor_size = HorizontalFootprint(new_turret); // donor is instantiated at world scale
-            float world_old = WorldTurretFootprint(base_entity_id);
-            if (card_old < 0.0001f || donor_size < 0.0001f || world_old < 0.0001f) return;
+            if (card_old < 0.0001f || donor_size < 0.0001f) return;
+            float target = structural ? 0.6f : 0.85f;
 
-            float world_factor = TurretScaleFactor(world_old, donor_size);
-            float factor = world_factor * (card_old / world_old); // card_old / world_old = the card's shrink
-            if (factor < 0.0001f) return;
+            var world = WorldFootprintsOf(base_entity_id);
+            float factor;
+            if (world.turret > 0.001f){
+                float world_factor = TurretScaleFactor(world.turret, donor_size, target);
+                if (world.chassis > 0.001f)
+                    world_factor = Mathf.Min(world_factor, Mathf.Max(0.05f, ChassisCapRatio * world.chassis / donor_size));
+                factor = world_factor * (card_old / world.turret); // card_old / world.turret = the card's shrink
+            } else {
+                // probe failed: a snug exact fit beats what this path used to do here, which was
+                // NOTHING - a world-scale lance left towering over a card-scale chassis
+                factor = card_old / donor_size * target;
+            }
+            if (factor < 0.0001f || Mathf.Abs(factor - 1f) < 0.0001f) return;
             new_turret.localScale *= factor;
         }
 
-        // Footprint of a unit's OWN turret at world scale, measured off the prefab. Cached: this
-        // costs an instantiate, and previews are rebuilt constantly as the player browses cards.
-        static readonly Dictionary<string, float> world_turret_footprint = new Dictionary<string, float>();
-        static float WorldTurretFootprint(string entity_id){
-            if (world_turret_footprint.TryGetValue(entity_id, out float cached)) return cached;
-            float size = 0f;
+        // Turret and chassis footprints of a unit at world scale, measured off the prefab.
+        // Cached: this costs an instantiate, and previews are rebuilt constantly while browsing.
+        struct WorldFootprints { public float turret, chassis; }
+        static readonly Dictionary<string, WorldFootprints> world_footprints = new Dictionary<string, WorldFootprints>();
+        static WorldFootprints WorldFootprintsOf(string entity_id){
+            if (world_footprints.TryGetValue(entity_id, out var cached)) return cached;
+            var result = new WorldFootprints();
             GameObject probe = null;
             try{
                 var prefab = Resources.Load(EntityBalancingStore.PrefabLocation(entity_id));
@@ -191,12 +230,14 @@ namespace RCM_UnitsMixNMatch
                     probe = (GameObject)GameObject.Instantiate(prefab, new Vector3(0f, -10000f, 0f), Quaternion.identity);
                     var controller = probe.GetComponent<EntityController>();
                     Transform pivot = (controller == null || controller.aiming == null) ? null : GetPivotFromAiming(controller.aiming);
-                    if (pivot != null) size = HorizontalFootprint(pivot);
+                    if (pivot != null) result.turret = HorizontalFootprint(pivot);
+                    if (TryGetMeshBounds(probe.transform, out Bounds chassis_b, pivot))
+                        result.chassis = Mathf.Max(chassis_b.size.x, chassis_b.size.z);
                 }
-            } catch (Exception e){ RCMManager.Log("world turret footprint failed for " + entity_id + ": " + e.Message); }
+            } catch (Exception e){ RCMManager.Log("world footprint probe failed for " + entity_id + ": " + e.Message); }
             finally { if (probe != null) GameObject.Destroy(probe); }
-            world_turret_footprint[entity_id] = size;
-            return size;
+            world_footprints[entity_id] = result;
+            return result;
         }
 
         static float HorizontalFootprint(Transform root){
@@ -209,21 +250,25 @@ namespace RCM_UnitsMixNMatch
         // from its own pivot (tall donor chassis), leaving the gun floating next to the new body.
         // so move the transplanted pivot until the new turret's mesh sits where the old one's was:
         // centered on it horizontally, resting at the same base height
-        static void AlignTransplantedTurret(Transform old_turret, Transform new_turret){
+        static void AlignTransplantedTurret(Transform old_turret, Transform new_turret, bool sit_on_top = false){
             if (!TryGetMeshBounds(old_turret, out Bounds old_b) || !TryGetMeshBounds(new_turret, out Bounds new_b)) return;
-            Vector3 target = new Vector3(old_b.center.x, old_b.min.y + new_b.extents.y, old_b.center.z);
+            // replacing a turret: rest at the old one's base. riding a kept torso: rest on its top.
+            float base_y = sit_on_top ? old_b.max.y : old_b.min.y;
+            Vector3 target = new Vector3(old_b.center.x, base_y + new_b.extents.y, old_b.center.z);
             Vector3 offset = target - new_b.center;
             if (offset.sqrMagnitude < 0.0001f) return;
             new_turret.position += offset;
-            RCMManager.Log($"aligned transplanted turret by {offset.magnitude:F2}");
+            RCMManager.Log($"aligned transplanted turret by {offset.magnitude:F2}{(sit_on_top ? " (onto torso)" : "")}");
         }
 
-        static bool TryGetMeshBounds(Transform root, out Bounds total){
+        static bool TryGetMeshBounds(Transform root, out Bounds total, Transform exclude_a = null, Transform exclude_b = null){
             total = default;
             List<Bounds> parts = new List<Bounds>();
             foreach (var r in root.GetComponentsInChildren<Renderer>()){
                 if (!(r is MeshRenderer) && !(r is SkinnedMeshRenderer)) continue;
                 if (!r.enabled) continue;
+                if (exclude_a != null && IsChildOf(r.transform, exclude_a)) continue;
+                if (exclude_b != null && IsChildOf(r.transform, exclude_b)) continue;
                 parts.Add(r.bounds);
             }
             if (parts.Count == 0) return false;
@@ -299,14 +344,18 @@ namespace RCM_UnitsMixNMatch
                     if (comp is Transform || comp is MeshFilter || comp is MeshRenderer || comp is SkinnedMeshRenderer) continue;
                     GameObject.Destroy(comp);
                 }
-                MatchTurretScaleForPreview(base_entity_id, old_pivot, new_pivot);
-                AlignTransplantedTurret(old_pivot, new_pivot);
+                bool structural = PivotIsStructural(display_model.transform, old_pivot, new_pivot);
+                MatchTurretScaleForPreview(base_entity_id, old_pivot, new_pivot, structural);
+                AlignTransplantedTurret(old_pivot, new_pivot, sit_on_top: structural);
                 // match the display layer or the card/preview camera won't render it
                 int display_layer = old_pivot.gameObject.layer;
                 foreach (var t in new_pivot.GetComponentsInChildren<Transform>(true)) t.gameObject.layer = display_layer;
 
-                foreach (var r in old_pivot.GetComponentsInChildren<Renderer>()) r.enabled = false;
-                foreach (var p in old_pivot.GetComponentsInChildren<ParticleSystem>()) p.gameObject.SetActive(false);
+                // a structural pivot (torso) stays visible; hiding it beheads the card model
+                if (!structural){
+                    foreach (var r in old_pivot.GetComponentsInChildren<Renderer>()) r.enabled = false;
+                    foreach (var p in old_pivot.GetComponentsInChildren<ParticleSystem>()) p.gameObject.SetActive(false);
+                }
             } finally{
                 GameObject.Destroy(donor_obj);
             }
@@ -663,18 +712,23 @@ namespace RCM_UnitsMixNMatch
 
                 // match the new turret's size to the one it replaces, then align the meshes
                 // (both measured before the old turret's renderers get disabled below)
+                bool structural = PivotIsStructural(__instance.transform, current_turret_pivot, frankenstien_pivot);
                 if (ScaleTransplantedTurrets)
-                    MatchTurretScale(current_turret_pivot, frankenstien_pivot);
-                AlignTransplantedTurret(current_turret_pivot, frankenstien_pivot);
+                    MatchTurretScale(current_turret_pivot, frankenstien_pivot, __instance.transform, structural);
+                AlignTransplantedTurret(current_turret_pivot, frankenstien_pivot, sit_on_top: structural);
 
                 // there are a few things i haven't fixed that prevent us from just deleting the old turret, especially with laser beam attacks
                 //current_turret_pivot.SetParent(null);
                 //GameObject.Destroy(current_turret_pivot.gameObject);
-                // for now we simply disable the mesh & particle renderers
-                foreach (var r in current_turret_pivot.GetComponentsInChildren<Renderer>())
-                    r.enabled = false;
-                foreach (var p in current_turret_pivot.GetComponentsInChildren<ParticleSystem>())
-                    p.gameObject.SetActive(false);
+                // for now we simply disable the mesh & particle renderers - unless the pivot is the
+                // unit's own torso (harvester bots aim with their whole upper body), which stays
+                // visible with the donor gun seated on top
+                if (!structural){
+                    foreach (var r in current_turret_pivot.GetComponentsInChildren<Renderer>())
+                        r.enabled = false;
+                    foreach (var p in current_turret_pivot.GetComponentsInChildren<ParticleSystem>())
+                        p.gameObject.SetActive(false);
+                }
 
                 // finally, cleanup the entity we stole the turret from
                 GameObject.Destroy(frankenstien_entity_obj);
