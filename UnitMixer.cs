@@ -292,8 +292,11 @@ namespace RCM_UnitsMixNMatch
 
             // Contact clamp: whatever the pivot bounds claimed (a tiny emitter halfway up a mast, a
             // pole), the gun must touch the unit's main body. If its underside still hangs above
-            // the hull block's top, pull it down into it.
-            if (TryGetDominantBounds(unit_root, out Bounds body, old_turret, new_turret)
+            // the hull block's top, pull it down into it. NOT for torso mounts: there the anchor IS
+            // the torso and already guarantees contact, while "the body without both pivots" is
+            // just the legs - clamping against those buried the harvester's shoulder gun.
+            if (!sit_on_top
+                && TryGetDominantBounds(unit_root, out Bounds body, old_turret, new_turret)
                 && TryGetMeshBounds(new_turret, out Bounds seated)
                 && seated.min.y > body.max.y){
                 float drop = seated.min.y - (body.max.y - 0.15f * seated.size.y);
@@ -377,6 +380,9 @@ namespace RCM_UnitsMixNMatch
                 EntityController donor_controller = donor_obj.GetComponent<EntityController>();
                 Transform new_pivot = (donor_controller == null || donor_controller.aiming == null) ? null : GetPivotFromAiming(donor_controller.aiming);
                 if (new_pivot == null) return;
+                // mirror of the world path: torso donors are refused there, so the card must show
+                // the stock unit too
+                if (PivotIsStructural(donor_obj.transform, new_pivot, null)) return;
 
                 new_pivot.SetParent(old_pivot.parent);
                 new_pivot.position = old_pivot.position;
@@ -497,6 +503,13 @@ namespace RCM_UnitsMixNMatch
                 List<SingleTargetAction> new_aiming_components = new List<SingleTargetAction>();
                 try{
                     if (frankenstien_pivot == null) throw new InvalidOperationException("no usable pivot on donor");
+                    // A donor whose pivot is its own torso (walkers aim with their whole upper
+                    // body) is not a turret anyone can wear: the chassis cap barely shrinks it, and
+                    // its walk/idle animations - which the swap carries over - reposition it to
+                    // walker height every cycle, which is the giant mech hovering over the support
+                    // tank. Such donors are refused, the unit stays stock.
+                    if (PivotIsStructural(frankenstien_entity_obj.transform, frankenstien_pivot, null))
+                        throw new InvalidOperationException("donor's pivot is its torso, not a mountable turret");
                     CloneAimingComponentsTo(__instance, new_aiming_components, frankenstien_controller.aiming);
                     // Aiming components hold a DIRECT reference to the transform they rotate. Only
                     // the pivot subtree gets reparented onto us; anything the donor aimed outside it
