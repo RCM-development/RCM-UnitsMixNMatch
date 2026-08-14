@@ -172,7 +172,13 @@ namespace RCM_UnitsMixNMatch
             if (!TryGetMeshBounds(unit_root, out Bounds unit_b, donor_pivot)) return false;
             float pivot_size = Mathf.Max(pivot_b.size.x, pivot_b.size.z);
             float unit_size = Mathf.Max(unit_b.size.x, unit_b.size.z);
-            return unit_size > 0.001f && pivot_size / unit_size > 0.55f;
+            if (unit_size < 0.001f || pivot_size / unit_size <= 0.55f) return false;
+            // Footprint alone is not enough: the support tank's long medic gun spans over half the
+            // unit but starts high on the hull, and treating it as structure kept it AND stacked
+            // the donor on top - two turrets. A torso reaches DOWN into the body; a gun, however
+            // long, sits on top of it. Only a pivot whose mesh starts in the lower part of the
+            // unit is really structure.
+            return pivot_b.min.y < unit_b.min.y + 0.4f * unit_b.size.y;
         }
 
         static void MatchTurretScale(Transform old_turret, Transform new_turret, Transform unit_root, bool structural){
@@ -255,6 +261,10 @@ namespace RCM_UnitsMixNMatch
             // replacing a turret: rest at the old one's base. riding a kept torso: rest on its top.
             float base_y = sit_on_top ? old_b.max.y : old_b.min.y;
             Vector3 target = new Vector3(old_b.center.x, base_y + new_b.extents.y, old_b.center.z);
+            // seat it INTO the torso rather than hovering at its topmost pixel (bounds tops are
+            // often an antenna): sink by a third of the smaller height so the mount visually
+            // connects - a shoulder cannon, not a balloon
+            if (sit_on_top) target.y -= Mathf.Min(new_b.size.y, old_b.size.y) * 0.35f;
             Vector3 offset = target - new_b.center;
             if (offset.sqrMagnitude < 0.0001f) return;
             new_turret.position += offset;
