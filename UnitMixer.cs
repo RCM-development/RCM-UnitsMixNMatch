@@ -256,18 +256,50 @@ namespace RCM_UnitsMixNMatch
         // from its own pivot (tall donor chassis), leaving the gun floating next to the new body.
         // so move the transplanted pivot until the new turret's mesh sits where the old one's was:
         // centered on it horizontally, resting at the same base height
-        static void AlignTransplantedTurret(Transform old_turret, Transform new_turret, bool sit_on_top = false){
-            if (!TryGetMeshBounds(old_turret, out Bounds old_b) || !TryGetMeshBounds(new_turret, out Bounds new_b)) return;
-            // replacing a turret: rest at the old one's base. riding a kept torso: rest on its top.
-            float base_y = sit_on_top ? old_b.max.y : old_b.min.y;
-            Vector3 target = new Vector3(old_b.center.x, base_y + new_b.extents.y, old_b.center.z);
-            // seat it INTO the torso rather than hovering at its topmost pixel (bounds tops are
-            // often an antenna): sink by a third of the smaller height so the mount visually
-            // connects - a shoulder cannon, not a balloon
-            if (sit_on_top) target.y -= Mathf.Min(new_b.size.y, old_b.size.y) * 0.35f;
+        // The single largest visible mesh part. Combined AABBs lied to us twice: an antenna extends
+        // max.y so guns mounted "on top" hovered at antenna height, and it drags center.x sideways
+        // so they drifted toward the antenna. The biggest block IS the torso/hull for every unit
+        // that matters, and thin tall parts cannot skew it.
+        static bool TryGetDominantBounds(Transform root, out Bounds best, Transform exclude_a = null, Transform exclude_b = null){
+            best = default;
+            float best_volume = -1f;
+            foreach (var r in root.GetComponentsInChildren<Renderer>()){
+                if (!(r is MeshRenderer) && !(r is SkinnedMeshRenderer)) continue;
+                if (!r.enabled) continue;
+                if (exclude_a != null && IsChildOf(r.transform, exclude_a)) continue;
+                if (exclude_b != null && IsChildOf(r.transform, exclude_b)) continue;
+                Bounds b = r.bounds;
+                float volume = b.size.x * b.size.y * b.size.z;
+                if (volume > best_volume){ best_volume = volume; best = b; }
+            }
+            return best_volume > 0f;
+        }
+
+        static void AlignTransplantedTurret(Transform unit_root, Transform old_turret, Transform new_turret, bool sit_on_top = false){
+            if (!TryGetMeshBounds(new_turret, out Bounds new_b)) return;
+            // anchor on the old part's dominant block, not its combined bounds
+            if (!TryGetDominantBounds(old_turret, out Bounds anchor)){
+                if (!TryGetMeshBounds(old_turret, out anchor)) return;
+            }
+            // replacing a turret: rest at its base. riding a kept torso: sink into its top by a
+            // third of the smaller height, so the mount connects - a shoulder cannon, not a balloon
+            float target_y = sit_on_top
+                ? anchor.max.y + new_b.extents.y - Mathf.Min(new_b.size.y, anchor.size.y) * 0.35f
+                : anchor.min.y + new_b.extents.y;
+            Vector3 target = new Vector3(anchor.center.x, target_y, anchor.center.z);
             Vector3 offset = target - new_b.center;
-            if (offset.sqrMagnitude < 0.0001f) return;
-            new_turret.position += offset;
+            if (offset.sqrMagnitude > 0.0001f) new_turret.position += offset;
+
+            // Contact clamp: whatever the pivot bounds claimed (a tiny emitter halfway up a mast, a
+            // pole), the gun must touch the unit's main body. If its underside still hangs above
+            // the hull block's top, pull it down into it.
+            if (TryGetDominantBounds(unit_root, out Bounds body, old_turret, new_turret)
+                && TryGetMeshBounds(new_turret, out Bounds seated)
+                && seated.min.y > body.max.y){
+                float drop = seated.min.y - (body.max.y - 0.15f * seated.size.y);
+                new_turret.position += Vector3.down * drop;
+                RCMManager.Log($"contact clamp pulled turret down by {drop:F2}");
+            }
             RCMManager.Log($"aligned transplanted turret by {offset.magnitude:F2}{(sit_on_top ? " (onto torso)" : "")}");
         }
 
@@ -356,7 +388,7 @@ namespace RCM_UnitsMixNMatch
                 }
                 bool structural = PivotIsStructural(display_model.transform, old_pivot, new_pivot);
                 MatchTurretScaleForPreview(base_entity_id, old_pivot, new_pivot, structural);
-                AlignTransplantedTurret(old_pivot, new_pivot, sit_on_top: structural);
+                AlignTransplantedTurret(display_model.transform, old_pivot, new_pivot, sit_on_top: structural);
                 // match the display layer or the card/preview camera won't render it
                 int display_layer = old_pivot.gameObject.layer;
                 foreach (var t in new_pivot.GetComponentsInChildren<Transform>(true)) t.gameObject.layer = display_layer;
@@ -725,7 +757,7 @@ namespace RCM_UnitsMixNMatch
                 bool structural = PivotIsStructural(__instance.transform, current_turret_pivot, frankenstien_pivot);
                 if (ScaleTransplantedTurrets)
                     MatchTurretScale(current_turret_pivot, frankenstien_pivot, __instance.transform, structural);
-                AlignTransplantedTurret(current_turret_pivot, frankenstien_pivot, sit_on_top: structural);
+                AlignTransplantedTurret(__instance.transform, current_turret_pivot, frankenstien_pivot, sit_on_top: structural);
 
                 // there are a few things i haven't fixed that prevent us from just deleting the old turret, especially with laser beam attacks
                 //current_turret_pivot.SetParent(null);
