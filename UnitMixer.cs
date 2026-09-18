@@ -569,6 +569,12 @@ namespace RCM_UnitsMixNMatch
                 // NOTE: for now we have to delete all of these components on the new turret because they have references that escape the turret gameobject
                 // we could fix these up to reference the `__instance` variable instead, but haven't tested if this works or not
                 ScaleByChangeableValue[] scaleables = frankenstien_entity_obj.GetComponentsInChildren<ScaleByChangeableValue>();
+                // these boxes size themselves in LOCAL scale from a stat (weapon range etc) but are hit-tested by their WORLD
+                // size, so remember the scale they were authored under: shrinking the turret to fit the new chassis would
+                // otherwise shrink the weapon's real reach with it while the unit still opens fire at its full weapon range
+                var authored_scales = new Dictionary<ScaleByChangeableValue, float>();
+                foreach (var scaleable in scaleables)
+                    if (scaleable.transform.parent != null) authored_scales[scaleable] = scaleable.transform.parent.lossyScale.z;
                 foreach (var scaleable in scaleables)
                     scaleable.entityController = __instance;
                     //GameObject.Destroy (scaleable);
@@ -689,10 +695,15 @@ namespace RCM_UnitsMixNMatch
                             already_exists = true;
                     if (!already_exists){
                         __instance.EntityIdentifiers.Add(ident);
-                        if (!IsChildOfOrCopyTopLevelChild(ident.scaledOverlapBox?.gameObject?.transform, true)){
-                            ident.scaledOverlapBox = null;
+                        // an ident WITH a box gets the box migrated along; only one that selects by overlap box
+                        // and has none left needs a fallback radius. this used to fire for every ident WITHOUT a
+                        // box (null transform -> false), which overwrote authored radii like a grenade's
+                        // SelfEffectRadius1 with the whole weapon range: splash and heal auras 10x too wide
+                        if (ident.scaledOverlapBox != null)
+                            IsChildOfOrCopyTopLevelChild(ident.scaledOverlapBox.gameObject.transform, true);
+                        else if (ident.radius == EntityIdentifier.Radius.OverlapBox){
                             ident.radius = EntityIdentifier.Radius.SelfWeaponRange;
-                            if (log_details) RCMManager.Log("had to null out scaled overlap box on entity ident: '" + ident.name + "' from: " + __instance.entityId + " <- " + frankenstien_id);
+                            if (log_details) RCMManager.Log("entity ident '" + ident.name + "' selects by overlap box but has none, using weapon range: " + __instance.entityId + " <- " + frankenstien_id);
                         }
                     }
                 }
@@ -846,6 +857,14 @@ namespace RCM_UnitsMixNMatch
                 if (ScaleTransplantedTurrets)
                     MatchTurretScale(current_turret_pivot, frankenstien_pivot, __instance.transform, structural);
                 AlignTransplantedTurret(__instance.transform, current_turret_pivot, frankenstien_pivot, sit_on_top: structural);
+                foreach (var pair in authored_scales){
+                    if (pair.Key == null || pair.Key.transform.parent == null) continue;
+                    float now = pair.Key.transform.parent.lossyScale.z;
+                    if (now > 0.0001f && pair.Value > 0.0001f && Mathf.Abs(pair.Value / now - 1f) > 0.01f){
+                        pair.Key.multiplier *= pair.Value / now;
+                        if (log_details) RCMManager.Log("hit box '" + pair.Key.name + "' rescaled x" + (pair.Value / now).ToString("0.00") + " to keep its authored reach: " + __instance.entityId + " <- " + frankenstien_id);
+                    }
+                }
 
                 // there are a few things i haven't fixed that prevent us from just deleting the old turret, especially with laser beam attacks
                 //current_turret_pivot.SetParent(null);
