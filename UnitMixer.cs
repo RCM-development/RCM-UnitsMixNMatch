@@ -78,7 +78,7 @@ namespace RCM_UnitsMixNMatch
                     probe = (GameObject)GameObject.Instantiate(prefab, new Vector3(0f, -10000f, 0f), Quaternion.identity);
                     var controller = probe.GetComponent<EntityController>();
                     Transform pivot = (controller == null || controller.aiming == null) ? null : GetPivotFromAiming(controller.aiming);
-                    ok = pivot != null && !PivotIsStructural(probe.transform, pivot, null, entity_id + " as donor");
+                    ok = pivot != null && DonorIsMountable(entity_id, probe.transform, pivot);
                 }
             } catch (Exception e){ RCMManager.Log("CanDonate probe failed for " + entity_id + ": " + e.Message); }
             finally { if (probe != null) GameObject.Destroy(probe); }
@@ -291,6 +291,24 @@ namespace RCM_UnitsMixNMatch
         // and so does any single "dominant" part (a torso built from many small meshes has no big
         // block, which is how the harvester briefly lost its torso again). The measurements are
         // logged once per unit, so thresholds get tuned from data instead of from screenshots.
+        // Set from measurements, not taste. The first logged run put the harvester bot at 0.61 -
+        // one hundredth over the 0.60 this started at, so its torso was hidden - with walkers
+        // around 0.4-0.7 and real turret carriers from 1.4 (PCX CF Tank) to 2.4 (Support Tank).
+        const float StructuralVolumeRatio = 0.75f;
+
+        // Can this entity's turret be worn by someone else? A unit whose pivot is its own torso
+        // cannot (walkers, infantry: the chassis cap barely shrinks a torso, and the walk cycle
+        // the swap carries over drags it back to walker height). Turret BUILDINGS are exempt from
+        // that test: their gun head is nearly the whole building, so they measure exactly like a
+        // torso - 55 of 202 donors were being refused, the gun emplacements among them - yet a
+        // gun head on a pedestal is the most mountable thing in the game.
+        static bool DonorIsMountable(string donor_id, Transform donor_root, Transform pivot){
+            bool is_building = false;
+            try { is_building = EntityBalancingStore.HasRole(donor_id, UnitRole.Building); } catch { }
+            if (is_building) return true;
+            return !PivotIsStructural(donor_root, pivot, null, donor_id + " as donor");
+        }
+
         static readonly HashSet<string> structural_logged = new HashSet<string>();
         static bool PivotIsStructural(Transform unit_root, Transform pivot, Transform donor_pivot, string label = null){
             var pivot_parts = PartsIn(unit_root, pivot, null, null);
@@ -305,7 +323,7 @@ namespace RCM_UnitsMixNMatch
             float footprint_ratio = unit_size > 0.001f ? pivot_size / unit_size : 0f;
             float pivot_volume = TotalVolume(pivot_parts);
             float volume_ratio = pivot_volume > 0.0001f ? TotalVolume(rest_parts) / pivot_volume : float.MaxValue;
-            bool structural = footprint_ratio > 0.55f && volume_ratio < 0.6f;
+            bool structural = footprint_ratio > 0.55f && volume_ratio < StructuralVolumeRatio;
             if (label != null && structural_logged.Add(label))
                 RCMManager.Log($"structural check {label}: pivot/unit footprint {footprint_ratio:F2}, rest/pivot volume {volume_ratio:F2} -> {(structural ? "TORSO" : "turret")}");
             return structural;
@@ -407,7 +425,7 @@ namespace RCM_UnitsMixNMatch
                 if (new_pivot == null) return;
                 // mirror of the world path: torso donors are refused there, so the card must show
                 // the stock unit too
-                if (PivotIsStructural(donor_obj.transform, new_pivot, null, donor_id + " as donor")) return;
+                if (!DonorIsMountable(donor_id, donor_obj.transform, new_pivot)) return;
 
                 new_pivot.SetParent(old_pivot.parent);
                 new_pivot.position = old_pivot.position;
@@ -541,7 +559,7 @@ namespace RCM_UnitsMixNMatch
                     // its walk/idle animations - which the swap carries over - reposition it to
                     // walker height every cycle, which is the giant mech hovering over the support
                     // tank. Such donors are refused, the unit stays stock.
-                    if (PivotIsStructural(frankenstien_entity_obj.transform, frankenstien_pivot, null, frankenstien_id + " as donor"))
+                    if (!DonorIsMountable(frankenstien_id, frankenstien_entity_obj.transform, frankenstien_pivot))
                         throw new InvalidOperationException("donor's pivot is its torso, not a mountable turret");
                     CloneAimingComponentsTo(__instance, new_aiming_components, frankenstien_controller.aiming);
                     // Aiming components hold a DIRECT reference to the transform they rotate. Only
