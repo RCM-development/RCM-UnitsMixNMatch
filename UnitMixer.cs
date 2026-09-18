@@ -61,16 +61,22 @@ namespace RCM_UnitsMixNMatch
             else RCMManager.Log("LoadEntityCompatibilityList: no entities list to pull valid entities from");
         }
 
-        // Whether this entity's turret can be transplanted onto someone else: it needs a usable
-        // aiming pivot that is not its own torso. External donor selectors (the randomizer's
-        // seeded map) ask this UP FRONT, so a donor the swap would refuse anyway is never paired -
-        // otherwise the card gets named after a donor that silently falls back to stock, and the
-        // name, the preview and the spawned unit all disagree. Cached: one probe instantiate per
-        // entity per session, at menu time.
-        static readonly Dictionary<string, bool> can_donate_cache = new Dictionary<string, bool>();
-        public static bool CanDonate(string entity_id){
-            if (can_donate_cache.TryGetValue(entity_id, out bool cached)) return cached;
-            bool ok = false;
+        // What an entity can do in a swap, answered UP FRONT for external donor selectors (the
+        // randomizer's seeded map). A pairing the swap would refuse anyway must never be made:
+        // the card gets named after it, the swap silently falls back to stock, and the name, the
+        // preview and the spawned unit all disagree.
+        //   CanDonate  - has a usable aiming pivot that is not its own torso (buildings exempt).
+        //   CanReceive - has a pivot, and is not a RANGED unit whose pivot is its own body. Such a
+        //                unit (the turretless T0 tank: its whole hull aims) keeps its body when
+        //                mixed, fixed main gun and all, while only the donor weapon fires - a
+        //                visible gun that never shoots. A MELEE body is fine: the harvester keeps
+        //                its torso and tool arm and gains a shoulder cannon.
+        // One probe instantiate per entity per session answers both, cached, at menu time.
+        struct SwapAbility { public bool donate, receive; }
+        static readonly Dictionary<string, SwapAbility> swap_ability_cache = new Dictionary<string, SwapAbility>();
+        static SwapAbility SwapAbilityOf(string entity_id){
+            if (swap_ability_cache.TryGetValue(entity_id, out var cached)) return cached;
+            var ability = new SwapAbility();
             GameObject probe = null;
             try{
                 var prefab = Resources.Load(EntityBalancingStore.PrefabLocation(entity_id));
@@ -78,13 +84,21 @@ namespace RCM_UnitsMixNMatch
                     probe = (GameObject)GameObject.Instantiate(prefab, new Vector3(0f, -10000f, 0f), Quaternion.identity);
                     var controller = probe.GetComponent<EntityController>();
                     Transform pivot = (controller == null || controller.aiming == null) ? null : GetPivotFromAiming(controller.aiming);
-                    ok = pivot != null && DonorIsMountable(entity_id, probe.transform, pivot);
+                    if (pivot != null){
+                        bool structural = PivotIsStructural(probe.transform, pivot, null, entity_id);
+                        bool is_building = false;
+                        try { is_building = EntityBalancingStore.HasRole(entity_id, UnitRole.Building); } catch { }
+                        ability.donate = is_building || !structural;
+                        ability.receive = !structural || controller.melee;
+                    }
                 }
-            } catch (Exception e){ RCMManager.Log("CanDonate probe failed for " + entity_id + ": " + e.Message); }
+            } catch (Exception e){ RCMManager.Log("swap probe failed for " + entity_id + ": " + e.Message); }
             finally { if (probe != null) GameObject.Destroy(probe); }
-            can_donate_cache[entity_id] = ok;
-            return ok;
+            swap_ability_cache[entity_id] = ability;
+            return ability;
         }
+        public static bool CanDonate(string entity_id) => SwapAbilityOf(entity_id).donate;
+        public static bool CanReceive(string entity_id) => SwapAbilityOf(entity_id).receive;
 
         static System.Random rng = new System.Random();
         static string GetRandomSupportedEntity(){
@@ -296,18 +310,11 @@ namespace RCM_UnitsMixNMatch
         // around 0.4-0.7 and real turret carriers from 1.4 (PCX CF Tank) to 2.4 (Support Tank).
         const float StructuralVolumeRatio = 0.75f;
 
-        // Can this entity's turret be worn by someone else? A unit whose pivot is its own torso
-        // cannot (walkers, infantry: the chassis cap barely shrinks a torso, and the walk cycle
-        // the swap carries over drags it back to walker height). Turret BUILDINGS are exempt from
-        // that test: their gun head is nearly the whole building, so they measure exactly like a
-        // torso - 55 of 202 donors were being refused, the gun emplacements among them - yet a
-        // gun head on a pedestal is the most mountable thing in the game.
-        static bool DonorIsMountable(string donor_id, Transform donor_root, Transform pivot){
-            bool is_building = false;
-            try { is_building = EntityBalancingStore.HasRole(donor_id, UnitRole.Building); } catch { }
-            if (is_building) return true;
-            return !PivotIsStructural(donor_root, pivot, null, donor_id + " as donor");
-        }
+        // (Why a torso cannot donate: the chassis cap barely shrinks it, and the walk cycle the swap
+        // carries over drags it back to walker height. Why buildings are exempt: a gun
+        // emplacement's head is nearly the whole building, so it MEASURES like a torso - 55 of 202
+        // donors were being refused that way - yet it is the most mountable thing in the game.
+        // Both rules live in SwapAbilityOf.)
 
         static readonly HashSet<string> structural_logged = new HashSet<string>();
         static bool PivotIsStructural(Transform unit_root, Transform pivot, Transform donor_pivot, string label = null){
@@ -342,7 +349,7 @@ namespace RCM_UnitsMixNMatch
             }
             if (Mathf.Abs(factor - 1f) < 0.0001f) return;
             new_turret.localScale *= factor;
-            RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1}{(structural ? ", torso mount" : "")})");
+            if (log_details) RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1}{(structural ? ", torso mount" : "")})");
         }
 
         // The swap puts the donor PIVOT where the old pivot was, but a donor's mesh can sit far
@@ -371,9 +378,9 @@ namespace RCM_UnitsMixNMatch
                 && seated.min.y > body.max.y){
                 float drop = seated.min.y - (body.max.y - 0.15f * seated.size.y);
                 new_turret.position += unit_root.TransformVector(Vector3.down * drop);
-                RCMManager.Log($"contact clamp pulled turret down by {drop:F2}");
+                if (log_details) RCMManager.Log($"contact clamp pulled turret down by {drop:F2}");
             }
-            RCMManager.Log($"aligned transplanted turret by {offset.magnitude:F2}{(sit_on_top ? " (onto torso)" : "")}");
+            if (log_details) RCMManager.Log($"aligned transplanted turret by {offset.magnitude:F2}{(sit_on_top ? " (onto torso)" : "")}");
         }
 
         // Card models and building placement previews come from EntityFactory.CreateEntityMesh.
@@ -387,7 +394,7 @@ namespace RCM_UnitsMixNMatch
             public static void Postfix(string entityId, GameObject __result){
                 try{
                     if (__result == null || DonorSelector == null) return;
-                    if (!supported_entities.Contains(entityId)) return;
+                    if (!supported_entities.Contains(entityId) || !CanReceive(entityId)) return;
                     string donor_id = DonorSelector(entityId);
                     if (string.IsNullOrEmpty(donor_id) || !supported_entities.Contains(donor_id)) return;
                     var timer = StartTiming();
@@ -401,14 +408,22 @@ namespace RCM_UnitsMixNMatch
         static System.Diagnostics.Stopwatch StartTiming(){
             return LogSwapsSlowerThanMs > 0 ? System.Diagnostics.Stopwatch.StartNew() : null;
         }
+        // Swap details are logged the FIRST time a base/donor pair is seen, not per spawn. A third
+        // of a session's log was the same four lines repeated for every harvester that walked out
+        // of the HQ; the first occurrence carries all the information the rest repeat.
+        static readonly HashSet<string> logged_pairs = new HashSet<string>();
+        static bool log_details = true;
+
         static void ReportTiming(System.Diagnostics.Stopwatch watch, string what, string detail){
             if (watch == null) return;
             watch.Stop();
             double ms = watch.Elapsed.TotalMilliseconds;
-            if (ms >= LogSwapsSlowerThanMs)
+            // a known pair is only worth a line again when it is genuinely slow
+            if (ms >= LogSwapsSlowerThanMs && (log_details || ms >= LogSwapsSlowerThanMs * 5))
                 RCMManager.Log($"MixNMatch PERF: {what} took {ms:F1}ms ({detail})");
         }
         static void ApplyVisualSwap(GameObject display_model, string base_entity_id, string donor_id){
+            log_details = logged_pairs.Add(base_entity_id + "<-" + donor_id + " (card)");
             EntityController display_controller = display_model.GetComponent<EntityController>();
             // Deliberately NOT gated on skillAiming: the in-world swap now nulls it and mixes those
             // units, so refusing them here would put a stock model on the card for a unit that
@@ -425,7 +440,7 @@ namespace RCM_UnitsMixNMatch
                 if (new_pivot == null) return;
                 // mirror of the world path: torso donors are refused there, so the card must show
                 // the stock unit too
-                if (!DonorIsMountable(donor_id, donor_obj.transform, new_pivot)) return;
+                if (!CanDonate(donor_id)) return;
 
                 new_pivot.SetParent(old_pivot.parent);
                 new_pivot.position = old_pivot.position;
@@ -500,8 +515,9 @@ namespace RCM_UnitsMixNMatch
         public static class Patch_EntityController_Init{
             [HarmonyPrefix]
             public static bool Prefix(EntityController __instance, EntityController originEntity){
-                if (__instance.aiming == null 
-                || !supported_entities.Contains(__instance.entityId)) return true;
+                if (__instance.aiming == null
+                || !supported_entities.Contains(__instance.entityId)
+                || !CanReceive(__instance.entityId)) return true; // see SwapAbilityOf: no dead guns
 
                 var swap_timer = StartTiming();
 
@@ -525,7 +541,8 @@ namespace RCM_UnitsMixNMatch
                 if (frankenstien_id == "") return true; // selector opted this entity out of mixing
                 if (frankenstien_id == null || !supported_entities.Contains(frankenstien_id))
                     frankenstien_id = GetRandomSupportedEntity();
-                RCMManager.Log("mixing units, base entityID: " + __instance.entityId + ", turret from: " + frankenstien_id);
+                log_details = logged_pairs.Add(__instance.entityId + "<-" + frankenstien_id);
+                if (log_details) RCMManager.Log("mixing units, base entityID: " + __instance.entityId + ", turret from: " + frankenstien_id);
 
                 GameObject frankenstien_entity_obj = (GameObject)GameObject.Instantiate(Resources.Load(EntityBalancingStore.PrefabLocation(frankenstien_id)), new Vector3(0, 0, 0), Quaternion.identity);
                 EntityController frankenstien_controller = frankenstien_entity_obj.GetComponent<EntityController>();
@@ -536,7 +553,7 @@ namespace RCM_UnitsMixNMatch
                 // prefix, so setting them here is enough. the extension is padded a little because
                 // the new chassis reaches from its own collision radius
                 if (__instance.melee != frankenstien_controller.melee)
-                    RCMManager.Log("weapon is " + (frankenstien_controller.melee ? "melee" : "ranged") + ", switching " + __instance.entityId + " to match");
+                    if (log_details) RCMManager.Log("weapon is " + (frankenstien_controller.melee ? "melee" : "ranged") + ", switching " + __instance.entityId + " to match");
                 __instance.melee = frankenstien_controller.melee;
                 __instance.meleeRadiusExtension = frankenstien_controller.melee
                     ? frankenstien_controller.meleeRadiusExtension + 0.5f
@@ -559,7 +576,7 @@ namespace RCM_UnitsMixNMatch
                     // its walk/idle animations - which the swap carries over - reposition it to
                     // walker height every cycle, which is the giant mech hovering over the support
                     // tank. Such donors are refused, the unit stays stock.
-                    if (!DonorIsMountable(frankenstien_id, frankenstien_entity_obj.transform, frankenstien_pivot))
+                    if (!CanDonate(frankenstien_id))
                         throw new InvalidOperationException("donor's pivot is its torso, not a mountable turret");
                     CloneAimingComponentsTo(__instance, new_aiming_components, frankenstien_controller.aiming);
                     // Aiming components hold a DIRECT reference to the transform they rotate. Only
@@ -578,7 +595,7 @@ namespace RCM_UnitsMixNMatch
                     // donor not swappable: clean up whatever was half-built and leave the unit stock
                     foreach (var added in new_aiming_components) GameObject.Destroy(added);
                     GameObject.Destroy(frankenstien_entity_obj);
-                    RCMManager.Log("skipping swap for " + __instance.entityId + " <- " + frankenstien_id + ": " + e.Message);
+                    if (log_details) RCMManager.Log("skipping swap for " + __instance.entityId + " <- " + frankenstien_id + ": " + e.Message);
                     return true;
                 }
                 // clone succeeded: NOW retire the old aiming components
@@ -668,7 +685,7 @@ namespace RCM_UnitsMixNMatch
                         if (!IsChildOfOrCopyTopLevelChild(ident.scaledOverlapBox?.gameObject?.transform, true)){
                             ident.scaledOverlapBox = null;
                             ident.radius = EntityIdentifier.Radius.SelfWeaponRange;
-                            RCMManager.Log("had to null out scaled overlap box on entity ident: '" + ident.name + "' from: " + __instance.entityId + " <- " + frankenstien_id);
+                            if (log_details) RCMManager.Log("had to null out scaled overlap box on entity ident: '" + ident.name + "' from: " + __instance.entityId + " <- " + frankenstien_id);
                         }
                     }
                 }
