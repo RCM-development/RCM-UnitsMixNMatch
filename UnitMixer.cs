@@ -61,6 +61,31 @@ namespace RCM_UnitsMixNMatch
             else RCMManager.Log("LoadEntityCompatibilityList: no entities list to pull valid entities from");
         }
 
+        // Whether this entity's turret can be transplanted onto someone else: it needs a usable
+        // aiming pivot that is not its own torso. External donor selectors (the randomizer's
+        // seeded map) ask this UP FRONT, so a donor the swap would refuse anyway is never paired -
+        // otherwise the card gets named after a donor that silently falls back to stock, and the
+        // name, the preview and the spawned unit all disagree. Cached: one probe instantiate per
+        // entity per session, at menu time.
+        static readonly Dictionary<string, bool> can_donate_cache = new Dictionary<string, bool>();
+        public static bool CanDonate(string entity_id){
+            if (can_donate_cache.TryGetValue(entity_id, out bool cached)) return cached;
+            bool ok = false;
+            GameObject probe = null;
+            try{
+                var prefab = Resources.Load(EntityBalancingStore.PrefabLocation(entity_id));
+                if (prefab != null){
+                    probe = (GameObject)GameObject.Instantiate(prefab, new Vector3(0f, -10000f, 0f), Quaternion.identity);
+                    var controller = probe.GetComponent<EntityController>();
+                    Transform pivot = (controller == null || controller.aiming == null) ? null : GetPivotFromAiming(controller.aiming);
+                    ok = pivot != null && !PivotIsStructural(probe.transform, pivot, null);
+                }
+            } catch (Exception e){ RCMManager.Log("CanDonate probe failed for " + entity_id + ": " + e.Message); }
+            finally { if (probe != null) GameObject.Destroy(probe); }
+            can_donate_cache[entity_id] = ok;
+            return ok;
+        }
+
         static System.Random rng = new System.Random();
         static string GetRandomSupportedEntity(){
             if (supported_entities.Count == 0) return "CareTank";
@@ -173,12 +198,18 @@ namespace RCM_UnitsMixNMatch
             float pivot_size = Mathf.Max(pivot_b.size.x, pivot_b.size.z);
             float unit_size = Mathf.Max(unit_b.size.x, unit_b.size.z);
             if (unit_size < 0.001f || pivot_size / unit_size <= 0.55f) return false;
-            // Footprint alone is not enough: the support tank's long medic gun spans over half the
-            // unit but starts high on the hull, and treating it as structure kept it AND stacked
-            // the donor on top - two turrets. A torso reaches DOWN into the body; a gun, however
-            // long, sits on top of it. Only a pivot whose mesh starts in the lower part of the
-            // unit is really structure.
-            return pivot_b.min.y < unit_b.min.y + 0.4f * unit_b.size.y;
+            // The decisive question is what REMAINS when the pivot is hidden. A real turret leaves
+            // the hull it stood on - the support tank's gun assembly spans most of the tank and its
+            // mount reaches low, yet hiding it leaves a whole tank. A torso leaves a pair of feet.
+            // The earlier depth-of-mount test kept misfiring on exactly such low-slung gun mounts,
+            // which is how the support tank ended up wearing donors ON TOP of its own kept gun.
+            // Compared by dominant-block VOLUME, not footprint: feet are tiny but stand wide, and
+            // a stance-width footprint would call them a substantial remainder.
+            if (!TryGetDominantBounds(pivot, out Bounds pivot_dom)) return false;
+            if (!TryGetDominantBounds(unit_root, out Bounds rest_dom, pivot, donor_pivot)) return true; // nothing left = torso
+            float pivot_volume = pivot_dom.size.x * pivot_dom.size.y * pivot_dom.size.z;
+            float rest_volume = rest_dom.size.x * rest_dom.size.y * rest_dom.size.z;
+            return pivot_volume > 0.0001f && rest_volume < 0.3f * pivot_volume;
         }
 
         static void MatchTurretScale(Transform old_turret, Transform new_turret, Transform unit_root, bool structural){
