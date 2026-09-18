@@ -25,6 +25,8 @@ namespace RCM_UnitsMixNMatch
         static RCMModUI mod;
         private void Awake()
         {
+            VerboseLog = Config.Bind("Diagnostics", "VerboseLog", false,
+                "Log the per-unit measurements behind each mounting decision (structural check lines). For tuning; noisy.").Value;
             LoadEntityCompatibilityList();
             new Harmony(IDENTIFIER).PatchAll();
             RCMManager.ConnectMod("Units Mix&Match").ContinueWith(t =>
@@ -50,6 +52,11 @@ namespace RCM_UnitsMixNMatch
 
         // hitch attribution: log any single swap slower than this (0 disables)
         public static double LogSwapsSlowerThanMs = 3.0;
+
+        // Per-unit measurement lines ("structural check ...") are how mounting thresholds get tuned,
+        // and they are two thirds of a normal session's log - one line per unit in the compat list,
+        // at menu time. Off for players, one config switch away for whoever tunes.
+        public static bool VerboseLog;
         void LoadEntityCompatibilityList(){
             supported_entities.Clear();
             if (File.Exists(supported_entities_path)){
@@ -331,7 +338,7 @@ namespace RCM_UnitsMixNMatch
             float pivot_volume = TotalVolume(pivot_parts);
             float volume_ratio = pivot_volume > 0.0001f ? TotalVolume(rest_parts) / pivot_volume : float.MaxValue;
             bool structural = footprint_ratio > 0.55f && volume_ratio < StructuralVolumeRatio;
-            if (label != null && structural_logged.Add(label))
+            if (VerboseLog && label != null && structural_logged.Add(label))
                 RCMManager.Log($"structural check {label}: pivot/unit footprint {footprint_ratio:F2}, rest/pivot volume {volume_ratio:F2} -> {(structural ? "TORSO" : "turret")}");
             return structural;
         }
