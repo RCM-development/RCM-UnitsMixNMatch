@@ -97,6 +97,20 @@ namespace RCM_UnitsMixNMatch
                         try { is_building = EntityBalancingStore.HasRole(entity_id, UnitRole.Building); } catch { }
                         ability.donate = is_building || !structural;
                         ability.receive = !structural || controller.melee;
+
+                        // The swap transplants the ATTACK events (OnReadyToShoot, OnHasShot, ...). Two kinds of
+                        // "weapon" do not live there and break in both directions:
+                        //  - no attack cooldown: suicide bombs (PCXBigBomber, PCXBomber, RoboBomb, PCXTermiteHover).
+                        //    Their attack is blowing themselves up; as a donor that made "Support Tank + PCX Big
+                        //    Bomber", as a host it would never go off.
+                        //  - map-range guns (range 50+: UltraTurret 600, SupportSwarmArtillery 500,
+                        //    PCXMissileArtillery 250): aimed and fired through their SKILL and its fire zone. As a
+                        //    donor the gun never fires; as a host the skill spends its MP on a weapon that is gone.
+                        float range = EntityBalancingStore.WeaponRange(entity_id, returnOriginalValueFromBalancingFile: true);
+                        float cooldown = EntityBalancingStore.Attack1Cooldown(entity_id, returnOriginalValueFromBalancingFile: true);
+                        bool real_gun = cooldown > 0.01f && range > 0.01f && range < 50f;
+                        ability.donate &= real_gun;
+                        ability.receive &= cooldown > 0.01f && range < 50f; // melee hosts have range 0 and are fine
                     }
                 }
             } catch (Exception e){ RCMManager.Log("swap probe failed for " + entity_id + ": " + e.Message); }
