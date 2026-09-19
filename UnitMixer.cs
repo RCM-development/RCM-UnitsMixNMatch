@@ -124,6 +124,11 @@ namespace RCM_UnitsMixNMatch
             swap_ability_cache[entity_id] = ability;
             return ability;
         }
+        static bool IsFiringEvent(EntityController.Event e)
+            => e == EntityController.Event.OnAttackHitTarget || e == EntityController.Event.OnAttackMissedTarget
+            || e == EntityController.Event.OnAttackWarmUpStarted || e == EntityController.Event.OnHasShot
+            || e == EntityController.Event.OnReadyToShoot;
+
         static bool SkillFiresProjectiles(EntityController controller){
             foreach (var _event in controller.events){
                 if (_event.@event != EntityController.Event.OnActivateSkill) continue;
@@ -840,6 +845,31 @@ namespace RCM_UnitsMixNMatch
                             break;
                         default: break;
                     }
+                }
+
+                // A transplanted shot that picks its targets through a named identifier resolves that
+                // name on the FIRING unit (ShootProjectile.Run -> EntitiesFromChosenIdentifier(name,
+                // payload.Self, ...)). If the host has no identifier of that name, Run stops before a
+                // projectile is ever spawned: the unit is told to fire, nothing leaves the barrel, and it
+                // stands there looking idle with nothing in either log. The donor's identifiers are copied
+                // above, so this should hold - but a name that did not make it through leaves exactly
+                // that silent failure, so it is checked rather than trusted.
+                foreach (var _event in __instance.events){
+                    if (!IsFiringEvent(_event.@event)) continue;
+                    foreach (var action in _event.actions) CheckShotIdentifier(action);
+                    foreach (var conditional in _event.conditionalActions)
+                        foreach (var action in conditional.actions) CheckShotIdentifier(action);
+                }
+                void CheckShotIdentifier(IEntityAction action){
+                    var shot = action as ShootProjectile;
+                    if (shot == null || !shot.chooseTargetFromEntityIdentifier || string.IsNullOrEmpty(shot.multipleTargetEntityIdentifier)) return;
+                    foreach (var ident in __instance.EntityIdentifiers)
+                        if (ident != null && ident.name == shot.multipleTargetEntityIdentifier) return;
+                    string missing = shot.multipleTargetEntityIdentifier;
+                    shot.chooseTargetFromEntityIdentifier = false; // fall back to the unit's current target
+                    shot.multipleTargetEntityIdentifier = "";
+                    RCMManager.Log("shot identifier '" + missing + "' missing on " + __instance.entityId
+                        + " <- " + frankenstien_id + ": firing at the current target instead");
                 }
 
 
