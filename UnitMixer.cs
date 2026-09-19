@@ -646,7 +646,7 @@ namespace RCM_UnitsMixNMatch
                             } else valid_tranforms++;
                         }
                         // now if the animation has any transforms left, add it to new unit
-                        if (valid_tranforms > 1){
+                        if (valid_tranforms > 0){
                             // find a matching event
                             bool did_find = false;
                             foreach (var src_event in __instance.events){ 
@@ -807,6 +807,9 @@ namespace RCM_UnitsMixNMatch
 
 
                 // this is technically redundant as we dont destroy any of the turret pieces for now
+                // a pivot that is really the unit's body (walker torso, harvester) stays visible and alive, so its
+                // animations must stay too: stripping them froze the body while the legs kept walking
+                bool structural = PivotIsStructural(__instance.transform, current_turret_pivot, frankenstien_pivot, __instance.entityId + " (world)");
                 bool CheckAndCleanAnimation(IEntityAction action){
                     if (action.GetType() == typeof(Animate)){
                         Animate fireProjectileAction = (Animate)action;
@@ -818,6 +821,11 @@ namespace RCM_UnitsMixNMatch
                                     if (fireProjectileAction.animationDescriptions[m].transformIndex == b){
                                         fireProjectileAction.animationDescriptions.RemoveAt(m);
                                         m--;
+                                    // everything behind the removed transform moved down one slot. without this the
+                                    // remaining descriptions index past the end of `transforms` and Animate throws on
+                                    // every play (walkers: turret parts listed before leg parts)
+                                    } else if (fireProjectileAction.animationDescriptions[m].transformIndex > b){
+                                        fireProjectileAction.animationDescriptions[m].transformIndex -= 1;
                                 }}
                                 b--;
                         }}
@@ -826,7 +834,7 @@ namespace RCM_UnitsMixNMatch
                     }
                     return false;
                 }
-                foreach (var _event in __instance.events){
+                foreach (var _event in __instance.events){ if (structural) break;
                     foreach (var conditional_action in _event.conditionalActions){
                         for (int i = 0; i < conditional_action.actions.Count; i++){
                             var action = conditional_action.actions[i];
@@ -853,7 +861,7 @@ namespace RCM_UnitsMixNMatch
 
                 // match the new turret's size to the one it replaces, then align the meshes
                 // (both measured before the old turret's renderers get disabled below)
-                bool structural = PivotIsStructural(__instance.transform, current_turret_pivot, frankenstien_pivot, __instance.entityId + " (world)");
+                // (structural was measured above, before the old turret's animations were considered)
                 if (ScaleTransplantedTurrets)
                     MatchTurretScale(current_turret_pivot, frankenstien_pivot, __instance.transform, structural);
                 AlignTransplantedTurret(__instance.transform, current_turret_pivot, frankenstien_pivot, sit_on_top: structural);
