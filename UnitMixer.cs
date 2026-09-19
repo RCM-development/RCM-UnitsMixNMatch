@@ -111,12 +111,35 @@ namespace RCM_UnitsMixNMatch
                         bool real_gun = cooldown > 0.01f && range > 0.01f && range < 50f;
                         ability.donate &= real_gun;
                         ability.receive &= cooldown > 0.01f && range < 50f; // melee hosts have range 0 and are fine
+
+                        // A host whose SKILL fires projectiles resolves their hits in its own OnAttackHitTarget
+                        // (keyed on the projectile index) - one of the events the swap deletes and replaces with the
+                        // donor's. MissileArtillery <- LaserCannonTurret: the skill missiles flew, hit, and did 0
+                        // damage with no splash. Such hosts keep their own weapon.
+                        if (SkillFiresProjectiles(controller)) ability.receive = false;
                     }
                 }
             } catch (Exception e){ RCMManager.Log("swap probe failed for " + entity_id + ": " + e.Message); }
             finally { if (probe != null) GameObject.Destroy(probe); }
             swap_ability_cache[entity_id] = ability;
             return ability;
+        }
+        static bool SkillFiresProjectiles(EntityController controller){
+            foreach (var _event in controller.events){
+                if (_event.@event != EntityController.Event.OnActivateSkill) continue;
+                if (ContainsShot(_event.actions)) return true;
+                foreach (var conditional in _event.conditionalActions)
+                    if (ContainsShot(conditional.actions)) return true;
+            }
+            return false;
+        }
+        static bool ContainsShot(List<IEntityAction> actions){
+            if (actions == null) return false;
+            foreach (var action in actions){
+                if (action is ShootProjectile) return true;
+                if (action is RunSerial serial && ContainsShot(serial.actions)) return true;
+            }
+            return false;
         }
         public static bool CanDonate(string entity_id) => SwapAbilityOf(entity_id).donate;
         public static bool CanReceive(string entity_id) => SwapAbilityOf(entity_id).receive;
