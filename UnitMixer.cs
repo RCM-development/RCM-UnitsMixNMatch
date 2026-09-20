@@ -124,6 +124,16 @@ namespace RCM_UnitsMixNMatch
             swap_ability_cache[entity_id] = ability;
             return ability;
         }
+        // what value drives a ScaleByChangeableValue box on a given unit
+        static float StatBehind(ScaleByChangeableValue scaleable, EntityController controller){
+            if (controller == null) return 0f;
+            try {
+                return scaleable.scaleBy == ScaleByChangeableValue.ScaleBy.EffectRadius2
+                    ? controller.EffectRadius2
+                    : controller.GetChangeableValueAsFloat(scaleable.changeableValue);
+            } catch { return 0f; }
+        }
+
         static bool IsFiringEvent(EntityController.Event e)
             => e == EntityController.Event.OnAttackHitTarget || e == EntityController.Event.OnAttackMissedTarget
             || e == EntityController.Event.OnAttackWarmUpStarted || e == EntityController.Event.OnHasShot
@@ -635,9 +645,27 @@ namespace RCM_UnitsMixNMatch
                 var authored_scales = new Dictionary<ScaleByChangeableValue, float>();
                 foreach (var scaleable in scaleables)
                     if (scaleable.transform.parent != null) authored_scales[scaleable] = scaleable.transform.parent.lossyScale.z;
-                foreach (var scaleable in scaleables)
+                // A box driven by a stat the HOST does not have collapses to nothing, and every weapon that
+                // damages "whatever is inside this box" then deals nothing at all. Robo Poker's damage is
+                // DealDamage(Damage1 via Identified:RoboPokeScalableAttackWR) and that box is sized from
+                // weapon range - on a melee Claw Bot (range 0) it became a box of zero size, so the claw
+                // swung, animated and hurt nobody. When the host's stat is zero the box keeps the size the
+                // donor authored instead of following the host.
+                foreach (var scaleable in scaleables){
+                    float donor_value = StatBehind(scaleable, frankenstien_controller);
+                    float host_value = StatBehind(scaleable, __instance);
                     scaleable.entityController = __instance;
-                    //GameObject.Destroy (scaleable);
+                    if (host_value > 0.001f || donor_value <= 0.001f) continue;
+                    float size = donor_value * scaleable.multiplier;
+                    Vector3 frozen = Vector3.one;
+                    if ((scaleable.axis & ScaleByChangeableValue.Axis.X) != ScaleByChangeableValue.Axis.None) frozen.x = size;
+                    if ((scaleable.axis & ScaleByChangeableValue.Axis.Y) != ScaleByChangeableValue.Axis.None) frozen.y = size;
+                    if ((scaleable.axis & ScaleByChangeableValue.Axis.Z) != ScaleByChangeableValue.Axis.None) frozen.z = size;
+                    scaleable.transform.localScale = frozen;
+                    scaleable.enabled = false;
+                    RCMManager.Log("hit box '" + scaleable.name + "' would collapse on " + __instance.entityId + " <- " + frankenstien_id
+                        + " (its " + scaleable.scaleBy + " is 0 here): frozen at the donor's size " + size.ToString("0.##"));
+                }
 
                 // copy all of the aiming components from the new turret to current unit
                 Transform frankenstien_pivot = GetPivotFromAiming(frankenstien_controller.aiming) ;
