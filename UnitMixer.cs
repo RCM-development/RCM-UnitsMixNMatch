@@ -385,7 +385,24 @@ namespace RCM_UnitsMixNMatch
             return structural;
         }
 
-        static void MatchTurretScale(Transform old_turret, Transform new_turret, Transform unit_root, bool structural){
+        // The card and the battlefield run the SAME seating code, so a visible difference between the two
+        // means the two paths measured different geometry - which is a bug, not a matter of taste, and was
+        // reported again for MachineGun Turret + Repeater Turret. Each path records what it decided; the
+        // first time they disagree for a pair, the mixer says so with both numbers.
+        static readonly Dictionary<string, float> preview_scale = new Dictionary<string, float>();
+        static readonly Dictionary<string, float> world_scale = new Dictionary<string, float>();
+        static readonly HashSet<string> scale_compared = new HashSet<string>();
+        static void RecordScale(string pair, float factor, bool preview){
+            (preview ? preview_scale : world_scale)[pair] = factor;
+            if (!preview_scale.ContainsKey(pair) || !world_scale.ContainsKey(pair) || !scale_compared.Add(pair)) return;
+            float p = preview_scale[pair], w = world_scale[pair];
+            float ratio = (p > 0.0001f && w > 0.0001f) ? Mathf.Max(p / w, w / p) : 1f;
+            if (ratio > 1.1f)
+                RCMManager.Log("card and battlefield seat the turret differently for " + pair + ": card x"
+                    + p.ToString("0.###") + ", unit x" + w.ToString("0.###"));
+        }
+
+        static void MatchTurretScale(Transform old_turret, Transform new_turret, Transform unit_root, bool structural, string pair = null, bool preview = false){
             float old_size = Footprint(unit_root, old_turret);
             float new_size = Footprint(unit_root, new_turret);
             // a gun RIDING the torso should stay clearly smaller than it; one REPLACING a turret
@@ -396,6 +413,7 @@ namespace RCM_UnitsMixNMatch
                 if (chassis > 0.001f && new_size > 0.001f)
                     factor = Mathf.Min(factor, Mathf.Max(0.05f, ChassisCapRatio * chassis / new_size));
             }
+            if (pair != null) RecordScale(pair, factor, preview);
             if (Mathf.Abs(factor - 1f) < 0.0001f) return;
             new_turret.localScale *= factor;
             if (log_details) RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1}{(structural ? ", torso mount" : "")})");
@@ -508,7 +526,7 @@ namespace RCM_UnitsMixNMatch
                 }
                 bool structural = PivotIsStructural(display_model.transform, old_pivot, new_pivot, base_entity_id + " (card)");
                 if (ScaleTransplantedTurrets)
-                    MatchTurretScale(old_pivot, new_pivot, display_model.transform, structural);
+                    MatchTurretScale(old_pivot, new_pivot, display_model.transform, structural, base_entity_id + " <- " + donor_id, preview: true);
                 AlignTransplantedTurret(display_model.transform, old_pivot, new_pivot, sit_on_top: structural);
                 // match the display layer or the card/preview camera won't render it
                 int display_layer = old_pivot.gameObject.layer;
@@ -930,7 +948,7 @@ namespace RCM_UnitsMixNMatch
                 // (both measured before the old turret's renderers get disabled below)
                 // (structural was measured above, before the old turret's animations were considered)
                 if (ScaleTransplantedTurrets)
-                    MatchTurretScale(current_turret_pivot, frankenstien_pivot, __instance.transform, structural);
+                    MatchTurretScale(current_turret_pivot, frankenstien_pivot, __instance.transform, structural, __instance.entityId + " <- " + frankenstien_id, preview: false);
                 AlignTransplantedTurret(__instance.transform, current_turret_pivot, frankenstien_pivot, sit_on_top: structural);
                 foreach (var pair in authored_scales){
                     if (pair.Key == null || pair.Key.transform.parent == null) continue;
