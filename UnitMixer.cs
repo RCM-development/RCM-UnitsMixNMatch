@@ -134,6 +134,14 @@ namespace RCM_UnitsMixNMatch
             } catch { return 0f; }
         }
 
+        // how long a unit spawned by a transplanted weapon lives (0 = leave as authored)
+        public static float SpawnedUnitLifetime = 10f;
+
+        static bool IsUnit(string entity_id){
+            try { return EntityBalancingStore.HasRole(entity_id, UnitRole.Unit) && !EntityBalancingStore.HasRole(entity_id, UnitRole.Building); }
+            catch { return false; }
+        }
+
         static bool IsFiringEvent(EntityController.Event e)
             => e == EntityController.Event.OnAttackHitTarget || e == EntityController.Event.OnAttackMissedTarget
             || e == EntityController.Event.OnAttackWarmUpStarted || e == EntityController.Event.OnHasShot
@@ -832,6 +840,20 @@ namespace RCM_UnitsMixNMatch
                         if (!IsChildOfOrCopyTopLevelChild(typed_action.collider?.gameObject?.transform)) typed_action.collider = null;
                     }
                     else if (action.GetType() == typeof(SpawnObject)){
+                        SpawnObject spawned = (SpawnObject)action;
+                        // A weapon that spawns a UNIT is spawning a free army: the PCX Barrage Truck's shell
+                        // drops a Nano Hunter on every impact, and on a player Artillery Truck that meant one
+                        // permanent extra unit per shell. Spawned units from a transplanted weapon now live
+                        // SpawnedUnitLifetime seconds and cost no unit slot, the way the game's own temporary
+                        // summons work. Effects and prefabs are untouched.
+                        if (spawned.spawn == SpawnObject.Spawn.EntityId && !string.IsNullOrEmpty(spawned.entityId)
+                            && SpawnedUnitLifetime > 0f && spawned.timeToLiveMultiplier <= 0.01f && IsUnit(spawned.entityId)){
+                            spawned.timeToLiveSource = EntityActionDuration.MultipleEntitySource.One;
+                            spawned.timeToLiveMultiplier = SpawnedUnitLifetime;
+                            spawned.ignoreUnitCapAlthoughNoSpawn = true;
+                            RCMManager.Log("weapon of " + frankenstien_id + " spawns the unit " + spawned.entityId
+                                + " on " + __instance.entityId + ": limited to " + SpawnedUnitLifetime.ToString("0") + "s");
+                        }
                         SpawnObject typed_action = (SpawnObject)action;
                         //if (typed_action.operatingEntities == MultipleEntitiesActionWithoutUpdate.OperatingEntities.Identified){
                         //    RCMManager.Log("had to clear entity spawnobject targeting params off of unit \""+ typed_action.entityIdentifierWithTargetAsOrigin + "\"" + __instance.entityId + "->" + frankenstien_id + "");
