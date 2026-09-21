@@ -403,24 +403,65 @@ namespace RCM_UnitsMixNMatch
             return structural;
         }
 
-        // The card and the battlefield run the SAME seating code, so a visible difference between the two
-        // means the two paths measured different geometry - which is a bug, not a matter of taste, and was
-        // reported again for MachineGun Turret + Repeater Turret. Each path records what it decided; the
-        // first time they disagree for a pair, the mixer says so with both numbers.
-        static readonly Dictionary<string, float> preview_scale = new Dictionary<string, float>();
-        static readonly Dictionary<string, float> world_scale = new Dictionary<string, float>();
-        static readonly HashSet<string> scale_compared = new HashSet<string>();
-        static void RecordScale(string pair, float factor, bool preview){
-            (preview ? preview_scale : world_scale)[pair] = factor;
-            if (!preview_scale.ContainsKey(pair) || !world_scale.ContainsKey(pair) || !scale_compared.Add(pair)) return;
-            float p = preview_scale[pair], w = world_scale[pair];
-            float ratio = (p > 0.0001f && w > 0.0001f) ? Mathf.Max(p / w, w / p) : 1f;
-            if (ratio > 1.1f)
-                RCMManager.Log("card and battlefield seat the turret differently for " + pair + ": card x"
-                    + p.ToString("0.###") + ", unit x" + w.ToString("0.###"));
+        // A donor is instantiated at its own prefab's scale and then measured in the local space of the
+        // HOST ROOT - so the factor that comes out depends on how big that root is, and the two paths
+        // do not have the same one. The card's display model is the prefab scaled to fit a card
+        // (CreateEntityMesh multiplies the prefab's own scale by the card's), while a spawned unit's
+        // root is whatever it was instantiated at, which a Titan or any other resize moves away from
+        // the prefab. Whatever that difference is, it divides into every pair identically - which is
+        // why two unrelated pairs, RoboCrystalHarvester <- Incinerator and BountyTank <- JeepWith-
+        // MachineGun, both came out x1.186 apart in the same battle.
+        //
+        // Both paths now bring the donor into the HOST PREFAB's units before anything is measured, so
+        // the factor means the same thing on the card and in the world. The card path already did this
+        // - that is what its compensation line was for - and the world path did not.
+        static readonly Dictionary<string, float> prefab_scale_cache = new Dictionary<string, float>();
+        static float HostPrefabScale(string base_entity_id){
+            if (prefab_scale_cache.TryGetValue(base_entity_id, out float cached)) return cached;
+            float scale = 1f;
+            try{
+                var prefab = Resources.Load(EntityBalancingStore.PrefabLocation(base_entity_id)) as GameObject;
+                if (prefab != null) scale = Mathf.Max(0.0001f, prefab.transform.lossyScale.x);
+            } catch { }
+            prefab_scale_cache[base_entity_id] = scale;
+            return scale;
         }
 
-        static void MatchTurretScale(Transform old_turret, Transform new_turret, Transform unit_root, bool structural, string pair = null, bool preview = false){
+        static void NormaliseDonorToHost(Transform donor_pivot, Transform host_root, string base_entity_id){
+            if (donor_pivot == null || host_root == null) return;
+            float k = Mathf.Max(0.0001f, host_root.lossyScale.x) / HostPrefabScale(base_entity_id);
+            if (Mathf.Abs(k - 1f) > 0.001f) donor_pivot.localScale *= k;
+        }
+
+        // The card and the battlefield run the SAME seating code, so a visible difference between the
+        // two is a bug, not a matter of taste - reported for MachineGun Turret + Repeater Turret. What
+        // is compared is what a player can actually SEE: how big the seated turret ends up and where it
+        // sits, both in root-local units (the unit's own frame, upright and at its own scale) and both
+        // measured after scaling AND alignment. Comparing the raw scale factor instead, as this did
+        // before, compares two numbers that are not in the same units and flags pairs that seat alike.
+        struct Seating { public float Size; public Vector3 Centre; }
+        static readonly Dictionary<string, Seating> preview_seating = new Dictionary<string, Seating>();
+        static readonly Dictionary<string, Seating> world_seating = new Dictionary<string, Seating>();
+        static readonly HashSet<string> seating_compared = new HashSet<string>();
+        static void RecordSeating(string pair, Transform unit_root, Transform turret, bool preview){
+            if (pair == null || unit_root == null || turret == null) return;
+            var seating = new Seating { Size = Footprint(unit_root, turret) };
+            if (TryGetMeshBounds(unit_root, turret, out Bounds b)) seating.Centre = b.center;
+            (preview ? preview_seating : world_seating)[pair] = seating;
+            if (!preview_seating.ContainsKey(pair) || !world_seating.ContainsKey(pair) || !seating_compared.Add(pair)) return;
+            Seating p = preview_seating[pair], w = world_seating[pair];
+            float scale = Mathf.Max(p.Size, w.Size);
+            if (scale < 0.0001f) return;
+            float size_ratio = (p.Size > 0.0001f && w.Size > 0.0001f) ? Mathf.Max(p.Size / w.Size, w.Size / p.Size) : 1f;
+            float shift = Vector3.Distance(p.Centre, w.Centre) / scale;
+            if (size_ratio > 1.1f || shift > 0.25f)
+                RCMManager.Log("card and battlefield seat the turret differently for " + pair
+                    + ": card size " + p.Size.ToString("0.##") + " at " + p.Centre.ToString("0.##")
+                    + ", unit size " + w.Size.ToString("0.##") + " at " + w.Centre.ToString("0.##")
+                    + " (size x" + size_ratio.ToString("0.##") + ", centre off by " + (shift * 100f).ToString("0") + "% of the turret)");
+        }
+
+        static void MatchTurretScale(Transform old_turret, Transform new_turret, Transform unit_root, bool structural){
             float old_size = Footprint(unit_root, old_turret);
             float new_size = Footprint(unit_root, new_turret);
             // a gun RIDING the torso should stay clearly smaller than it; one REPLACING a turret
@@ -431,7 +472,6 @@ namespace RCM_UnitsMixNMatch
                 if (chassis > 0.001f && new_size > 0.001f)
                     factor = Mathf.Min(factor, Mathf.Max(0.05f, ChassisCapRatio * chassis / new_size));
             }
-            if (pair != null) RecordScale(pair, factor, preview);
             if (Mathf.Abs(factor - 1f) < 0.0001f) return;
             new_turret.localScale *= factor;
             if (log_details) RCMManager.Log($"scaled transplanted turret x{factor:F2} (old footprint {old_size:F1}, new {new_size:F1}{(structural ? ", torso mount" : "")})");
@@ -534,9 +574,7 @@ namespace RCM_UnitsMixNMatch
                 // hierarchy. Bring it into the card's scale first - the same ratio the base unit
                 // itself was shrunk by - and from here on the preview is just the world swap: same
                 // classification, same clamped scale factor, same alignment, all in root-local space.
-                var base_prefab = Resources.Load(EntityBalancingStore.PrefabLocation(base_entity_id)) as GameObject;
-                float world_root_scale = base_prefab != null ? Mathf.Max(0.0001f, base_prefab.transform.lossyScale.x) : 1f;
-                new_pivot.localScale *= display_model.transform.lossyScale.x / world_root_scale;
+                NormaliseDonorToHost(new_pivot, display_model.transform, base_entity_id);
                 // display model only: strip everything but the meshes so nothing ticks or reacts
                 foreach (var comp in new_pivot.GetComponentsInChildren<Component>(true)){
                     if (comp is Transform || comp is MeshFilter || comp is MeshRenderer || comp is SkinnedMeshRenderer) continue;
@@ -544,8 +582,9 @@ namespace RCM_UnitsMixNMatch
                 }
                 bool structural = PivotIsStructural(display_model.transform, old_pivot, new_pivot, base_entity_id + " (card)");
                 if (ScaleTransplantedTurrets)
-                    MatchTurretScale(old_pivot, new_pivot, display_model.transform, structural, base_entity_id + " <- " + donor_id, preview: true);
+                    MatchTurretScale(old_pivot, new_pivot, display_model.transform, structural);
                 AlignTransplantedTurret(display_model.transform, old_pivot, new_pivot, sit_on_top: structural);
+                RecordSeating(base_entity_id + " <- " + donor_id, display_model.transform, new_pivot, preview: true);
                 // match the display layer or the card/preview camera won't render it
                 int display_layer = old_pivot.gameObject.layer;
                 foreach (var t in new_pivot.GetComponentsInChildren<Transform>(true)) t.gameObject.layer = display_layer;
@@ -993,13 +1032,18 @@ namespace RCM_UnitsMixNMatch
                 frankenstien_pivot.SetParent(current_turret_pivot.parent);
                 frankenstien_pivot.position = current_turret_pivot.position;
                 frankenstien_pivot.rotation = current_turret_pivot.rotation;
+                // same step the card path takes: measure in the host PREFAB's units, so a host that
+                // was spawned at a size its prefab does not have carries its turret with it instead
+                // of having the mismatch absorbed into the scale factor
+                NormaliseDonorToHost(frankenstien_pivot, __instance.transform, __instance.entityId);
 
                 // match the new turret's size to the one it replaces, then align the meshes
                 // (both measured before the old turret's renderers get disabled below)
                 // (structural was measured above, before the old turret's animations were considered)
                 if (ScaleTransplantedTurrets)
-                    MatchTurretScale(current_turret_pivot, frankenstien_pivot, __instance.transform, structural, __instance.entityId + " <- " + frankenstien_id, preview: false);
+                    MatchTurretScale(current_turret_pivot, frankenstien_pivot, __instance.transform, structural);
                 AlignTransplantedTurret(__instance.transform, current_turret_pivot, frankenstien_pivot, sit_on_top: structural);
+                RecordSeating(__instance.entityId + " <- " + frankenstien_id, __instance.transform, frankenstien_pivot, preview: false);
                 foreach (var pair in authored_scales){
                     if (pair.Key == null || pair.Key.transform.parent == null) continue;
                     float now = pair.Key.transform.parent.lossyScale.z;
