@@ -493,17 +493,36 @@ namespace RCM_UnitsMixNMatch
             if (offset.sqrMagnitude > 0.0001f) new_turret.position += unit_root.TransformVector(offset);
 
             // Contact clamp: whatever the pivot claimed (a small emitter halfway up a mast), a
-            // replaced turret must touch the body. Judged against the TOP OF EVERYTHING that is
-            // left - hull, hips - not against one block: the largest remaining block of a walker
-            // is a foot, and clamping to it dragged guns down to the ground. Not for torso mounts,
-            // whose anchor is the torso itself.
+            // replaced turret must touch the body. Not for torso mounts, whose anchor is the torso.
+            //
+            // It used to compare against the top of EVERYTHING that is left, which only catches a gun
+            // floating above the whole unit. A gun parked beside a mast is above the hull it should be
+            // resting on while still below the mast's tip, so nothing pulled it down - and the mast is
+            // often part of the old turret and gets its renderers disabled straight after, leaving the
+            // gun hanging over a gap. That is the "weapon floating above my support unit" report: the
+            // Robo Medic's own pivot measures 1.0 across, an emitter rather than a turret, and the gun
+            // was seated at ITS height.
+            //
+            // So the support is looked for UNDER the turret: the highest body part whose footprint
+            // actually overlaps the turret's, which is the surface it would rest on. Only if nothing
+            // sits beneath it at all does this fall back to the top of the body, the old behaviour.
             if (!sit_on_top
                 && TryGetMeshBounds(unit_root, unit_root, out Bounds body, old_turret, new_turret)
-                && TryGetMeshBounds(unit_root, new_turret, out Bounds seated)
-                && seated.min.y > body.max.y){
-                float drop = seated.min.y - (body.max.y - 0.15f * seated.size.y);
-                new_turret.position += unit_root.TransformVector(Vector3.down * drop);
-                if (log_details) RCMManager.Log($"contact clamp pulled turret down by {drop:F2}");
+                && TryGetMeshBounds(unit_root, new_turret, out Bounds seated)){
+                float support = body.max.y;
+                bool local = false;
+                foreach (var part in PartsIn(unit_root, unit_root, old_turret, new_turret)){
+                    if (part.max.x < seated.min.x || part.min.x > seated.max.x) continue;
+                    if (part.max.z < seated.min.z || part.min.z > seated.max.z) continue;
+                    if (!local || part.max.y > support) support = part.max.y;
+                    local = true;
+                }
+                // a gap worth closing, not the wobble of a gun that already sits on its mount
+                float drop = seated.min.y - (support - 0.15f * seated.size.y);
+                if (drop > 0.05f * Mathf.Max(0.001f, seated.size.y)){
+                    new_turret.position += unit_root.TransformVector(Vector3.down * drop);
+                    if (log_details) RCMManager.Log($"contact clamp pulled turret down by {drop:F2} onto the {(local ? "body under it" : "top of the body")}");
+                }
             }
             if (log_details) RCMManager.Log($"aligned transplanted turret by {offset.magnitude:F2}{(sit_on_top ? " (onto torso)" : "")}");
         }
