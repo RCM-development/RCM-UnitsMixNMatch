@@ -549,7 +549,25 @@ namespace RCM_UnitsMixNMatch
         }
 
         // timing helper shared by the swap paths
+        // Phase marks inside one swap: a spawn that costs 20ms is a dropped frame, and the total
+        // alone cannot say whether it is the donor instantiate, the bounds measuring or the event
+        // surgery. Cheap (a Stopwatch read per mark), reported only with a slow swap.
+        static readonly List<KeyValuePair<string, double>> swap_phases = new List<KeyValuePair<string, double>>();
+        static double swap_last_mark;
+        static void Mark(System.Diagnostics.Stopwatch watch, string phase){
+            if (watch == null) return;
+            double now = watch.Elapsed.TotalMilliseconds;
+            swap_phases.Add(new KeyValuePair<string, double>(phase, now - swap_last_mark));
+            swap_last_mark = now;
+        }
+        static string Phases(){
+            if (swap_phases.Count == 0) return "";
+            var parts = new List<string>();
+            foreach (var p in swap_phases) parts.Add($"{p.Key} {p.Value:F1}");
+            return " [" + string.Join(", ", parts) + "]";
+        }
         static System.Diagnostics.Stopwatch StartTiming(){
+            swap_phases.Clear(); swap_last_mark = 0;
             return LogSwapsSlowerThanMs > 0 ? System.Diagnostics.Stopwatch.StartNew() : null;
         }
         // Swap details are logged the FIRST time a base/donor pair is seen, not per spawn. A third
@@ -564,7 +582,7 @@ namespace RCM_UnitsMixNMatch
             double ms = watch.Elapsed.TotalMilliseconds;
             // a known pair is only worth a line again when it is genuinely slow
             if (ms >= LogSwapsSlowerThanMs && (log_details || ms >= LogSwapsSlowerThanMs * 5))
-                RCMManager.Log($"MixNMatch PERF: {what} took {ms:F1}ms ({detail})");
+                RCMManager.Log($"MixNMatch PERF: {what} took {ms:F1}ms ({detail})" + (ms >= LogSwapsSlowerThanMs * 5 ? Phases() : ""));
         }
         static void ApplyVisualSwap(GameObject display_model, string base_entity_id, string donor_id){
             log_details = logged_pairs.Add(base_entity_id + "<-" + donor_id + " (card)");
@@ -689,6 +707,7 @@ namespace RCM_UnitsMixNMatch
 
                 GameObject frankenstien_entity_obj = (GameObject)GameObject.Instantiate(Resources.Load(EntityBalancingStore.PrefabLocation(frankenstien_id)), new Vector3(0, 0, 0), Quaternion.identity);
                 EntityController frankenstien_controller = frankenstien_entity_obj.GetComponent<EntityController>();
+                Mark(swap_timer, "instantiate donor");
 
                 // whether a unit charges in or shoots from afar belongs to the weapon, not the chassis:
                 // a transplanted melee weapon (poker) on a ranged chassis would otherwise be swung
@@ -767,6 +786,7 @@ namespace RCM_UnitsMixNMatch
                 }
                 // clone succeeded: NOW retire the old aiming components
                 foreach (var comp in old_aiming_comps) GameObject.Destroy(comp);
+                Mark(swap_timer, "aiming");
                 if (new_aiming_components.Count == 0)
                     __instance.aiming = null;
                 else if (new_aiming_components.Count == 1)  
@@ -1002,7 +1022,9 @@ namespace RCM_UnitsMixNMatch
                 // this is technically redundant as we dont destroy any of the turret pieces for now
                 // a pivot that is really the unit's body (walker torso, harvester) stays visible and alive, so its
                 // animations must stay too: stripping them froze the body while the legs kept walking
+                Mark(swap_timer, "events+animations");
                 bool structural = PivotIsStructural(__instance.transform, current_turret_pivot, frankenstien_pivot, __instance.entityId + " (world)");
+                Mark(swap_timer, "structural");
                 bool CheckAndCleanAnimation(IEntityAction action){
                     if (action.GetType() == typeof(Animate)){
                         Animate fireProjectileAction = (Animate)action;
@@ -1063,6 +1085,7 @@ namespace RCM_UnitsMixNMatch
                     MatchTurretScale(current_turret_pivot, frankenstien_pivot, __instance.transform, structural);
                 AlignTransplantedTurret(__instance.transform, current_turret_pivot, frankenstien_pivot, sit_on_top: structural);
                 RecordSeating(__instance.entityId + " <- " + frankenstien_id, __instance.transform, frankenstien_pivot, preview: false);
+                Mark(swap_timer, "scale+align");
                 foreach (var pair in authored_scales){
                     if (pair.Key == null || pair.Key.transform.parent == null) continue;
                     float now = pair.Key.transform.parent.lossyScale.z;
@@ -1087,6 +1110,7 @@ namespace RCM_UnitsMixNMatch
 
                 // finally, cleanup the entity we stole the turret from
                 GameObject.Destroy(frankenstien_entity_obj);
+                Mark(swap_timer, "hide old+destroy");
 
                 ReportTiming(swap_timer, "unit swap", __instance.entityId + " <- " + frankenstien_id);
                 return true;
