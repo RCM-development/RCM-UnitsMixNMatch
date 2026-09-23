@@ -120,7 +120,10 @@ namespace RCM_UnitsMixNMatch
                     }
                 }
             } catch (Exception e){ RCMManager.Log("swap probe failed for " + entity_id + ": " + e.Message); }
-            finally { if (probe != null) GameObject.Destroy(probe); }
+            // Immediate: Destroy waits for the end of the frame, and a probe made early in a frame got its
+            // components' Update first - ScaleByChangeableValue then read stats off an entity that was never
+            // initialised (KeyNotFoundException 'WeaponRange', one per donor, now and then at the menu).
+            finally { if (probe != null) GameObject.DestroyImmediate(probe); }
             swap_ability_cache[entity_id] = ability;
             return ability;
         }
