@@ -579,10 +579,20 @@ namespace RCM_UnitsMixNMatch
         static readonly HashSet<string> logged_pairs = new HashSet<string>();
         static bool log_details = true;
 
+        // Running totals of in-world swaps, read by the randomizer's battle census: the PERF lines
+        // above only show slow swaps, so how much frame time swapping costs in a battle was unknowable.
+        public static int UnitSwapCount;
+        public static double UnitSwapMs, UnitSwapWorstMs;
+
         static void ReportTiming(System.Diagnostics.Stopwatch watch, string what, string detail){
             if (watch == null) return;
             watch.Stop();
             double ms = watch.Elapsed.TotalMilliseconds;
+            if (what == "unit swap"){
+                UnitSwapCount++;
+                UnitSwapMs += ms;
+                if (ms > UnitSwapWorstMs) UnitSwapWorstMs = ms;
+            }
             // a known pair is only worth a line again when it is genuinely slow
             if (ms >= LogSwapsSlowerThanMs && (log_details || ms >= LogSwapsSlowerThanMs * 5))
                 RCMManager.Log($"MixNMatch PERF: {what} took {ms:F1}ms ({detail})" + (ms >= LogSwapsSlowerThanMs * 5 ? Phases() : ""));
