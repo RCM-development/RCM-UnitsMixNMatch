@@ -194,6 +194,16 @@ namespace RCM_UnitsMixNMatch
                 new_action.direction = curr.direction;
                 new_action.minDegrees = curr.minDegrees;
                 new_action.maxDegrees = curr.maxDegrees;
+                // A horizontal turret with a narrow arc (PCX Dragon Bug: +-45) belongs to a unit that turns
+                // its whole BODY to face the target; the body's rotation does not travel with the turret, so
+                // on another chassis it could only ever hit what stood in a 90 degree cone in front (measured
+                // at the menu: RocketWalker <- PCXDragonBug left up to 135 degrees unaimed). The transplanted
+                // turret turns all the way round instead. Vertical (pitch) limits are the barrel's, kept.
+                if (curr.direction != RectTransform.Axis.Vertical && curr.maxDegrees - curr.minDegrees < 360f){
+                    new_action.minDegrees = -36000f;
+                    new_action.maxDegrees = 36000f;
+                    if (log_details) RCMManager.Log("turret arc " + curr.minDegrees + ".." + curr.maxDegrees + " opened to a full circle on " + __instance.entityId);
+                }
                 new_action.doNotRotateBackOnTeardown = curr.doNotRotateBackOnTeardown;
                 output_aiming_components.Add(new_action);
 
