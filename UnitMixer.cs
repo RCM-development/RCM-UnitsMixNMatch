@@ -823,6 +823,7 @@ namespace RCM_UnitsMixNMatch
                 // here we cleanup animations to remove any extra references, and then add them to our new unit
                 // NOTE: most of the animations that we give to the root unit will be overwritten anyway since we're blanket overwriting all shooting events
                 // however this is just so extra potentially non-shooting animations can get through. IE skill activation could have the turret play its animation and such
+                var carried_animation_ids = new HashSet<string>();
                 void FixupFrankenstienAnimations(EntityEvent _event, IEntityAction action){
                     if (action.GetType() == typeof(Animate)){
                         Animate animateAction = (Animate)action;
@@ -844,6 +845,7 @@ namespace RCM_UnitsMixNMatch
                         }
                         // now if the animation has any transforms left, add it to new unit
                         if (valid_tranforms > 0){
+                            if (!string.IsNullOrEmpty(animateAction.id)) carried_animation_ids.Add(animateAction.id);
                             // find a matching event
                             bool did_find = false;
                             foreach (var src_event in __instance.events){ 
@@ -865,6 +867,30 @@ namespace RCM_UnitsMixNMatch
                             FixupFrankenstienAnimations(_event, action);
                     foreach (var action in _event.actions)
                         FixupFrankenstienAnimations(_event, action);
+                }
+                // An Animate is ended by a Stop with its id on another event (PCXBaseTank: OnIdle -> Animate,
+                // OnFinishedIdle -> Stop), and only the Animate travelled. On the host the donor's idle sway
+                // started when the unit stood still and never ended: it wrote the turret pivot's rotation
+                // every frame, undoing the aiming's every step, so "Grenadier 4x4 (A Tank)" turned its
+                // counter to -186 degrees while the gun never moved and never reported ready. The Stops for
+                // every carried animation come along, under the same events the donor fires them from.
+                if (carried_animation_ids.Count > 0){
+                    var carried_stops = new List<string>();
+                    foreach (var _event in frankenstien_controller.events){
+                        foreach (var action in _event.actions){
+                            if (!(action is Stop stop) || string.IsNullOrEmpty(stop.idToStop) || !carried_animation_ids.Contains(stop.idToStop)) continue;
+                            EntityEvent host_event = null;
+                            foreach (var src_event in __instance.events) if (src_event.@event == _event.@event){ host_event = src_event; break; }
+                            if (host_event == null){ host_event = new EntityEvent(); host_event.@event = _event.@event; __instance.events.Add(host_event); }
+                            bool present = false;
+                            foreach (var existing in host_event.actions) if (existing is Stop s && s.idToStop == stop.idToStop) present = true;
+                            if (present) continue;
+                            host_event.actions.Add(new Stop { idToStop = stop.idToStop });
+                            carried_stops.Add(_event.@event + ":Stop(" + stop.idToStop + ")");
+                        }
+                    }
+                    if (log_details && carried_stops.Count > 0)
+                        RCMManager.Log("carried the stops for the donor's animations: " + string.Join(", ", carried_stops) + " (" + __instance.entityId + " <- " + frankenstien_id + ")");
                 }
 
 
