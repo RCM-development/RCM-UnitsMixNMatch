@@ -38,6 +38,6 @@
 
   <ItemGroup>
     <!-- RCM-Manager checked out as a sibling directory -->
-    <ProjectReference Include="..\RCM-Manager\TestMod.csproj" />
+    <ProjectReference Include="..\RCM-Manager\RCM_GUI.csproj" />
   </ItemGroup>
 </Project>
